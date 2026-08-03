@@ -1,0 +1,79 @@
+[package]
+name = "clean-dark-browser"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "A minimal, resource-frugal desktop browser built on WebView2"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "cleandark"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- Content blocking: native Rust, no JS, no per-request allocation storms ---
+# `single-thread` swaps the engine's internal Arc/Mutex for Rc/RefCell, which
+# suits us exactly: the engine is only ever consulted from the UI thread.
+# `embedded-domain-resolver` bundles the public-suffix list the matcher needs to
+# tell first-party from third-party; without it every lookup panics.
+adblock = { version = "0.13", default-features = false, features = [
+    "embedded-domain-resolver",
+    "full-regex-handling",
+    "single-thread",
+] }
+
+# --- Local storage ---
+rusqlite = { version = "0.37", features = ["bundled"] }
+# libsqlite3-sys 0.38.1's build script uses the still-unstable `cfg_select!`
+# macro and does not compile on stable rustc; 0.38.0 is the last usable patch.
+
+# --- Password vault ---
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.8"
+
+# --- Misc ---
+url = "2"
+directories = "6"
+
+# The engine binding is Windows-only. Keeping it in a target-gated section lets
+# the portable core (blocker, storage, vault, config) be compiled and tested on
+# any host, while the full browser is checked with
+# `cargo check --target x86_64-pc-windows-msvc`.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Networking_WinHttp",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_WinRT",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Keep the binary small; the WebView2 runtime is shared with the OS/Edge,
+# so we never ship a Chromium build ourselves.
+[profile.release.package."*"]
+opt-level = 3

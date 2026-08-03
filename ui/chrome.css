@@ -1,0 +1,485 @@
+/* The browser chrome: tab strip, toolbar, omnibox dropdown, menu.
+ *
+ * This document is rendered by its own WebView, sized to the header strip. It
+ * does not overlap the page except while a dropdown is open, so there is no
+ * steady-state overdraw over the viewport at all.
+ */
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-1);
+}
+
+/* ----------------------------------------------------------- window drag */
+
+/* WebView2's non-client region support turns these into real caption areas,
+ * so the host never has to guess which pixels move the window. */
+.drag {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.no-drag,
+input,
+button {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* ------------------------------------------------------------- tab strip */
+
+.tabstrip {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: var(--tabstrip-h);
+  padding: 6px 0 0 6px;
+  flex: 0 0 auto;
+}
+
+.tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 42px;
+  max-width: 210px;
+  flex: 1 1 180px;
+  height: 30px;
+  padding: 0 6px 0 10px;
+  border-radius: var(--radius-s) var(--radius-s) 0 0;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: default;
+  /* Only transform animates; the luminance comes from .lift's opacity. */
+  transition: transform var(--t-hover) var(--ease);
+}
+
+/* Dynamic relative tinting: hovering an inactive tab raises its luminance a
+ * touch. The active tab is already at full luminance, so it is excluded. */
+.tab:not(.active):hover::before {
+  opacity: 0.07;
+}
+
+.tab.active {
+  background: var(--surface-3);
+  color: var(--text-1);
+}
+
+.tab.active::before {
+  opacity: 0;
+}
+
+/* A suspended or discarded tab reads as dimmer, not as a different colour. */
+.tab.asleep .tab-title {
+  opacity: 0.5;
+}
+
+.tab-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: opacity var(--t-hover) var(--ease);
+}
+
+.tab-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+}
+
+.tab.loading .tab-dot,
+.tab.audible .tab-dot {
+  opacity: 1;
+}
+
+.tab.audible .tab-dot {
+  background: var(--text-2);
+}
+
+.tab-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  opacity: 0;
+}
+
+.tab:hover .tab-close {
+  opacity: var(--icon-rest);
+}
+
+.tab:hover .tab-close:hover {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+.tab-close:active {
+  transform: scale(0.9);
+  transition-duration: var(--t-press);
+}
+
+.tab-close svg {
+  width: 11px;
+  height: 11px;
+}
+
+.strip-spacer {
+  flex: 1 1 auto;
+  min-width: 8px;
+  align-self: stretch;
+}
+
+/* --------------------------------------------------------- window buttons */
+
+.wincontrols {
+  display: flex;
+  gap: 0;
+  align-self: flex-start;
+}
+
+.wincontrols .icon-btn {
+  width: 44px;
+  height: 30px;
+  border-radius: 0;
+}
+
+/* Window buttons must not scale — they sit flush against the window edge and
+ * a scale-up would visibly clip. Luminance alone carries the feedback. */
+.wincontrols .icon-btn:hover {
+  transform: none;
+}
+
+.wincontrols .icon-btn:active {
+  transform: none;
+}
+
+.wincontrols .close:hover::before {
+  opacity: 1;
+  background: var(--danger);
+}
+
+/* --------------------------------------------------------------- toolbar */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: calc(var(--chrome-h) - var(--tabstrip-h));
+  padding: 0 8px;
+  flex: 0 0 auto;
+  /* The header/viewport separation. A 1px solid line, no gradient, no shadow:
+   * nothing here composites against the page below. */
+  border-bottom: 1px solid var(--divider);
+}
+
+/* ---------------------------------------------------------------- omnibox */
+
+.omnibox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+  isolation: isolate;
+}
+
+/* Inset depth: on focus the field darkens slightly. A solid black sheet whose
+ * opacity animates, not a background-color transition. */
+.omnibox::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #000000;
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.omnibox:focus-within::before {
+  opacity: 0.38;
+}
+
+/* Focus ring: a fixed accent ring that fades in. The box-shadow itself never
+ * animates, only the opacity of the element carrying it. */
+.omnibox::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.omnibox:focus-within::after {
+  opacity: 1;
+}
+
+#url {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#url::placeholder {
+  color: var(--text-3);
+}
+
+.lock {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  color: var(--text-2);
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+}
+
+.lock svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+}
+
+.omnibox.secure .lock {
+  opacity: 0.75;
+}
+
+/* Shield badge: shows how many requests were blocked on this page. */
+.shield {
+  position: relative;
+}
+
+.shield-count {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #06070a;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 13px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+}
+
+.shield.has-blocks .shield-count {
+  opacity: 1;
+}
+
+.shield.off {
+  opacity: 0.3;
+}
+
+.star.on {
+  opacity: 1;
+  color: var(--accent);
+}
+
+/* -------------------------------------------------------------- dropdown */
+
+.dropdown {
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--divider);
+  display: none;
+}
+
+.dropdown.open {
+  display: block;
+}
+
+.suggestion {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 14px;
+  cursor: default;
+  border-radius: var(--radius-s);
+  margin: 0 6px;
+}
+
+.suggestion.selected::before,
+.suggestion:hover::before {
+  opacity: 0.07;
+}
+
+.suggestion-title {
+  flex: 0 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.suggestion-url {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ menu */
+
+.menu {
+  position: absolute;
+  top: calc(var(--chrome-h) - 6px);
+  right: 8px;
+  width: 232px;
+  padding: 5px;
+  border-radius: var(--radius-l);
+  background: var(--surface-2);
+  border: 1px solid var(--divider);
+  /* The menu is the one place a shadow is worth it: it is small, opens over
+   * the page only while open, and would otherwise have no edge at all. */
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  /* Animate transform + opacity, never height. */
+  opacity: 0;
+  transform: translateY(-4px) scale(0.98);
+  transform-origin: top right;
+  transition:
+    opacity var(--t-hover) var(--ease),
+    transform var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.menu.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-s);
+  color: var(--text-1);
+  cursor: default;
+}
+
+.menu-item:hover::before {
+  opacity: 0.07;
+}
+
+.menu-sep {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--divider);
+}
+
+.switch {
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--surface-0);
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: transform var(--t-hover) var(--ease);
+}
+
+.menu-item.on .switch::after {
+  transform: translateX(12px);
+  background: var(--accent);
+}
+
+/* ----------------------------------------------------------------- toast */
+
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  padding: 7px 14px;
+  border-radius: var(--radius-l);
+  background: var(--surface-3);
+  border: 1px solid var(--divider);
+  font-size: 12px;
+  opacity: 0;
+  /* translate is combined with the centring offset so only transform moves. */
+  transform: translate(-50%, 8px);
+  transition:
+    opacity var(--t-hover) var(--ease),
+    transform var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: 20;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.toast.warning {
+  color: #ffcf70;
+}
+
+.toast.error {
+  color: var(--danger);
+}
+
+/* ------------------------------------------------------------- incognito */
+
+body.incognito {
+  --accent: var(--private);
+}
+
+body.incognito .toolbar {
+  border-bottom-color: var(--private);
+}

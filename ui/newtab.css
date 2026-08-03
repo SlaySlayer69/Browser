@@ -1,0 +1,211 @@
+/* New tab: a search field with the speed dial grid directly beneath it.
+ *
+ * Renders with zero network requests — no favicon fetches, no fonts, no
+ * images. Tiles draw a coloured monogram instead, so the page is identical
+ * offline and costs nothing to open.
+ */
+
+body {
+  background: var(--surface-0);
+  display: flex;
+  justify-content: center;
+  overflow-y: auto;
+}
+
+.page {
+  width: 100%;
+  max-width: 640px;
+  padding: 18vh 24px 48px;
+}
+
+/* ----------------------------------------------------------- search field */
+
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  padding: 0 14px;
+  border-radius: var(--radius-l);
+  background: var(--surface-2);
+  isolation: isolate;
+}
+
+/* Same inset-depth and focus-ring vocabulary as the omnibox, so focusing
+ * either field feels like the same control. */
+.search::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #000000;
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.search:focus-within::before {
+  opacity: 0.38;
+}
+
+.search::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.search:focus-within::after {
+  opacity: 1;
+}
+
+.search svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+#q {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-1);
+  font: 15px/1 inherit;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#q::placeholder {
+  color: var(--text-3);
+}
+
+/* ------------------------------------------------------------ speed dials */
+
+.dials {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 26px;
+}
+
+@media (max-width: 520px) {
+  .dials {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.dial {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 92px;
+  padding: 10px;
+  border-radius: var(--radius-l);
+  background: var(--surface-1);
+  color: var(--text-2);
+  cursor: default;
+  isolation: isolate;
+  /* Micro-hover: lift and luminance only. Both composite on the GPU. */
+  transition: transform var(--t-hover) var(--ease);
+}
+
+.dial::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #ffffff;
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.dial:hover {
+  transform: translateY(-3px);
+}
+
+.dial:hover::before {
+  opacity: 0.07;
+}
+
+.dial:active {
+  transform: translateY(-1px) scale(0.98);
+  transition-duration: var(--t-press);
+}
+
+.dial-mono {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-m);
+  background: var(--accent);
+  color: #07080b;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.dial-title {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+.dial-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  opacity: 0;
+  z-index: 1;
+}
+
+.dial:hover .dial-remove {
+  opacity: 0.5;
+}
+
+.dial-remove:hover {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+.dial-remove svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* The "add" tile is a dial with no content of its own. */
+.dial.add .dial-mono {
+  background: var(--surface-3);
+  color: var(--text-3);
+}
+
+.hint {
+  margin-top: 18px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-3);
+  opacity: 0.75;
+}

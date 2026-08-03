@@ -1,0 +1,194 @@
+/* Adaptive Clean Dark — design tokens and the shared interaction vocabulary.
+ *
+ * Two rules govern everything in this file:
+ *
+ * 1. Animate `opacity` and `transform` only. Both are composited on the GPU
+ *    and never trigger layout or paint, so a hover effect costs nothing on the
+ *    main thread. Animating `background-color`, `box-shadow` or `filter` would
+ *    repaint the element on every frame.
+ *
+ * 2. No translucent layer is ever stretched over the viewport. Luminance
+ *    changes are done with a solid-white pseudo-element whose *opacity*
+ *    animates, scoped tightly to the control being hovered — a few hundred
+ *    pixels of overdraw instead of a full-window composite.
+ */
+
+:root {
+  /* Surfaces, darkest to lightest. */
+  --surface-0: #0e0f11; /* window base — matches the Win32 class brush */
+  --surface-1: #141619; /* chrome */
+  --surface-2: #1a1d21; /* omnibox, inactive tabs */
+  --surface-3: #22262b; /* raised controls */
+
+  /* The header/viewport separation: a solid, near-black hairline rather than
+   * a gradient or a shadow, so there is no alpha blending over the page. */
+  --divider: #050607;
+
+  --text-1: #e7e9ec;
+  --text-2: #9aa2ab;
+  --text-3: #6a727c;
+
+  /* Overwritten at runtime by the chameleon tint when a page declares
+   * <meta name="theme-color"> and the setting is on. */
+  --accent: #4c8dff;
+
+  --danger: #ff5c6a;
+  --private: #b76cff;
+
+  --radius-s: 6px;
+  --radius-m: 9px;
+  --radius-l: 12px;
+
+  /* Micro-interaction timings. Short enough to feel like feedback rather than
+   * animation. */
+  --t-hover: 120ms;
+  --t-press: 70ms;
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+
+  /* Resting opacity for icons; hover takes them to 1. */
+  --icon-rest: 0.68;
+
+  --chrome-h: 76px;
+  --tabstrip-h: 36px;
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--surface-1);
+  color: var(--text-1);
+  font: 13px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  /* The chrome must never scroll or select like a document. */
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ---------------------------------------------------------------- motion */
+
+/* Honour the OS setting, and let the settings panel force it via a class. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+  }
+}
+
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  transition-duration: 1ms !important;
+  animation-duration: 1ms !important;
+}
+
+/* ------------------------------------------------- luminance lift helper */
+
+/* A solid white sheet whose opacity animates. Because the element is opaque
+ * and the parent is opaque, this composites without reading the page behind
+ * it — the whole point of not using a translucent overlay on the viewport. */
+.lift {
+  position: relative;
+  isolation: isolate;
+}
+
+.lift::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #ffffff;
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.lift:hover::before {
+  opacity: 0.06;
+}
+
+.lift:active::before {
+  opacity: 0.03;
+}
+
+/* ------------------------------------------------------ icon micro-press */
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-1);
+  opacity: var(--icon-rest);
+  cursor: default;
+  /* Only these two properties animate. */
+  transition:
+    opacity var(--t-hover) var(--ease),
+    transform var(--t-hover) var(--ease);
+  -webkit-app-region: no-drag;
+}
+
+.icon-btn:hover:not(:disabled) {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+/* Haptic-feeling press: a quick dip, faster than the release. */
+.icon-btn:active:not(:disabled) {
+  transform: scale(0.95);
+  transition-duration: var(--t-press);
+}
+
+.icon-btn:disabled {
+  opacity: 0.25;
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- shared */
+
+.scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-3) transparent;
+}
+
+.muted {
+  color: var(--text-2);
+}
+
+.empty {
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--text-3);
+}

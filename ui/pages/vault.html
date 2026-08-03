@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self';" />
+    <title>Passwords</title>
+    <link rel="stylesheet" href="../theme.css" />
+    <link rel="stylesheet" href="pages.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div id="gate"></div>
+      <div id="unlocked" hidden>
+        <h1>Passwords</h1>
+        <p class="sub" id="count"></p>
+        <div class="toolbar">
+          <div style="flex:1 1 auto"></div>
+          <button class="btn" id="add">Add</button>
+          <button class="btn" id="lock">Lock</button>
+        </div>
+        <div class="list" id="list"></div>
+        <div class="empty" id="empty" hidden>No credentials saved.</div>
+      </div>
+    </div>
+    <script src="common.js"></script>
+    <script src="vault.js"></script>
+  </body>
+</html>

@@ -1,0 +1,265 @@
+/* Shared layout for the internal pages (history, downloads, bookmarks, vault).
+ *
+ * These are ordinary tabs rendered by a content WebView, so unlike the chrome
+ * they may scroll and select text.
+ */
+
+body {
+  background: var(--surface-0);
+  overflow-y: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.page {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 40px 24px 64px;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.sub {
+  margin: 0 0 22px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.field {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+  isolation: isolate;
+}
+
+.field::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.field:focus-within::after {
+  opacity: 1;
+}
+
+.field input {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  outline: none;
+}
+
+.field input::placeholder {
+  color: var(--text-3);
+}
+
+.btn {
+  height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+  color: var(--text-1);
+  font: inherit;
+  cursor: default;
+  position: relative;
+  isolation: isolate;
+  transition: transform var(--t-hover) var(--ease);
+}
+
+.btn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #ffffff;
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.btn:hover::before {
+  opacity: 0.07;
+}
+
+.btn:hover {
+  transform: scale(1.02);
+}
+
+.btn:active {
+  transform: scale(0.98);
+  transition-duration: var(--t-press);
+}
+
+.btn.accent {
+  background: var(--accent);
+  color: #07080b;
+}
+
+.btn.danger {
+  color: var(--danger);
+}
+
+/* ------------------------------------------------------------------ rows */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: var(--radius-m);
+  isolation: isolate;
+}
+
+.row::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #ffffff;
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.row:hover::before {
+  opacity: 0.05;
+}
+
+.mono {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-s);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.row-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.row-sub {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.row-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--t-hover) var(--ease);
+}
+
+.row:hover .row-actions {
+  opacity: 1;
+}
+
+/* --------------------------------------------------------------- progress */
+
+.progress {
+  height: 3px;
+  margin-top: 6px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+/* Scaled rather than width-animated: transform stays off the layout path. */
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 160ms linear;
+}
+
+/* ------------------------------------------------------------------ vault */
+
+.card {
+  max-width: 380px;
+  margin: 48px auto;
+  padding: 24px;
+  border-radius: var(--radius-l);
+  background: var(--surface-1);
+  text-align: center;
+}
+
+.card h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.card p {
+  margin: 0 0 18px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.card .field {
+  margin-bottom: 10px;
+}
+
+.card .btn {
+  width: 100%;
+}
+
+.secret {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent);
+}

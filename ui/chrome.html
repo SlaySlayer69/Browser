@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- No remote origins: the chrome is entirely local and must stay that way,
+         so a compromised page can never pull code into the browser UI. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:;"
+    />
+    <title>CleanDark</title>
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="chrome.css" />
+  </head>
+  <body>
+    <!-- Tab strip. The strip background is a drag region; the tabs and buttons
+         opt out via .no-drag so they stay clickable. -->
+    <div class="tabstrip drag">
+      <div class="tabs" id="tabs"></div>
+
+      <button class="icon-btn lift no-drag" id="new-tab" title="New tab (Ctrl+T)">
+        <svg viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9" /></svg>
+      </button>
+
+      <div class="strip-spacer drag"></div>
+
+      <div class="wincontrols no-drag">
+        <button class="icon-btn lift" id="win-min" title="Minimize">
+          <svg viewBox="0 0 16 16"><path d="M4 8.5h8" /></svg>
+        </button>
+        <button class="icon-btn lift" id="win-max" title="Maximize">
+          <svg viewBox="0 0 16 16"><rect x="4.25" y="4.25" width="7.5" height="7.5" rx="1" /></svg>
+        </button>
+        <button class="icon-btn lift close" id="win-close" title="Close">
+          <svg viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" /></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Toolbar. Its bottom border is the header/viewport separation line. -->
+    <div class="toolbar">
+      <button class="icon-btn lift" id="back" title="Back (Alt+Left)" disabled>
+        <svg viewBox="0 0 16 16"><path d="M10 3.5L5.5 8l4.5 4.5" /></svg>
+      </button>
+      <button class="icon-btn lift" id="forward" title="Forward (Alt+Right)" disabled>
+        <svg viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5" /></svg>
+      </button>
+      <button class="icon-btn lift" id="reload" title="Reload (Ctrl+R)">
+        <svg viewBox="0 0 16 16">
+          <path d="M13 8a5 5 0 1 1-1.6-3.7" />
+          <path d="M13 3v3.2h-3.2" />
+        </svg>
+      </button>
+
+      <div class="omnibox" id="omnibox">
+        <span class="lock" id="lock" aria-hidden="true">
+          <svg viewBox="0 0 16 16">
+            <rect x="3.5" y="7" width="9" height="6" rx="1.5" />
+            <path d="M5.75 7V5.25a2.25 2.25 0 0 1 4.5 0V7" />
+          </svg>
+        </span>
+        <input
+          id="url"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="Search or enter address"
+        />
+        <button class="icon-btn lift shield" id="shield" title="Content blocking">
+          <svg viewBox="0 0 16 16"><path d="M8 2.5l4.5 1.8v3.4c0 2.6-1.8 4.6-4.5 5.6-2.7-1-4.5-3-4.5-5.6V4.3z" /></svg>
+          <span class="shield-count" id="shield-count">0</span>
+        </button>
+        <button class="icon-btn lift star" id="star" title="Bookmark (Ctrl+D)">
+          <svg viewBox="0 0 16 16"><path d="M8 2.8l1.6 3.3 3.6.5-2.6 2.5.6 3.6L8 11l-3.2 1.7.6-3.6L2.8 6.6l3.6-.5z" /></svg>
+        </button>
+      </div>
+
+      <button class="icon-btn lift" id="menu-btn" title="Menu">
+        <svg viewBox="0 0 16 16"><path d="M3 5h10M3 8h10M3 11h10" /></svg>
+      </button>
+    </div>
+
+    <!-- Omnibox suggestions. Opening this grows the chrome overlay over the
+         page; the page itself is never resized, so it does not reflow. -->
+    <div class="dropdown scroll" id="dropdown"></div>
+
+    <div class="menu" id="menu">
+      <div class="menu-item lift" data-action="history">History<span class="muted">Ctrl+H</span></div>
+      <div class="menu-item lift" data-action="downloads">Downloads<span class="muted">Ctrl+J</span></div>
+      <div class="menu-item lift" data-action="bookmarks">Bookmarks<span class="muted">Ctrl+B</span></div>
+      <div class="menu-item lift" data-action="vault">Passwords</div>
+      <div class="menu-sep"></div>
+      <div class="menu-item lift" data-action="incognito">New private window</div>
+      <div class="menu-sep"></div>
+      <div class="menu-item lift" data-toggle="adblock">Block ads &amp; trackers<span class="switch"></span></div>
+      <div class="menu-item lift" data-toggle="chameleon">Adapt colour to page<span class="switch"></span></div>
+      <div class="menu-item lift" data-toggle="reduceMotion">Reduce motion<span class="switch"></span></div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="chrome.js"></script>
+  </body>
+</html>
