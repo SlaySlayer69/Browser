@@ -211,11 +211,53 @@ The parts most likely to need adjustment on first run are, in order:
 3. **`app-region: drag`** — requires `IsNonClientRegionSupportEnabled` and a
    recent enough runtime; on older runtimes the header will not drag the window.
 
+## First run on Windows
+
+The profile lives in `%LOCALAPPDATA%\CleanDark\data`:
+
+| File | Contents |
+|---|---|
+| `settings.json` | everything in `config::Settings` (written on first change/exit) |
+| `cleandark.sqlite` | history, downloads, bookmarks, speed dials |
+| `vault.bin` | the encrypted password vault |
+| `filters.bin` | the compiled adblock engine |
+| `lists/` | raw filter lists as downloaded |
+| `webview2/` | WebView2's own cache, cookies and local storage |
+
+Deleting that folder is a full reset.
+
+Two things about the first launch specifically:
+
+* **Blocking is not active immediately.** There is no compiled engine yet, so a
+  background thread fetches ~4 MB of filter lists and swaps the engine in when
+  it is done. A toast reports how many sources were compiled. Every later launch
+  loads `filters.bin` in milliseconds.
+* **Tab suspension is easiest to observe with a shorter threshold.** Set
+  `"suspend_after_secs": 15` in `settings.json` and restart; background tabs
+  then dim in the strip within about half a minute, and Task Manager shows the
+  renderer's working set drop.
+
+### Debugging the UI
+
+DevTools are compiled in for debug builds only. Page content can be inspected
+with the normal right-click menu, but the *chrome* WebView deliberately has no
+context menu and no browser accelerator keys, so F12 does not reach it. To
+inspect the chrome, add `--remote-debugging-port=9222` to `SWITCHES` in
+`engine/flags.rs`, rebuild, and open `http://localhost:9222` in Edge.
+
 ## Possible next steps
 
-* **Per-site autofill.** The vault stores and matches by normalised host
-  already; offering credentials on a login form is UI work, not crypto work.
+The two obvious ones:
+
+* **Per-site autofill.** The vault already stores and matches credentials by
+  normalised host, so offering them on a login form is UI work, not crypto work
+  — a form-detection hook in the injected bridge script plus a small dropdown.
+* **Session restore.** Tabs are not persisted across restarts at all. The tab
+  model already carries everything needed (URL, title, order); it needs a table
+  and a write on close.
+
+Further out:
+
 * **Cosmetic filtering.** Would remove leftover ad placeholders, at a real
   memory cost — worth making a setting rather than a default.
-* **Session restore.** Tabs are not persisted across restarts.
 * **`prefers-reduced-transparency`** and a high-contrast pass on the tokens.
