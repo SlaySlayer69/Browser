@@ -5,7 +5,8 @@ no Electron, no bundled Chromium, no framework in the UI layer.
 
 The browser ships seven features and nothing else: history, downloads, a native
 content blocker, bookmarks, speed dials, an encrypted password vault, and
-private windows.
+private windows. The new-tab page adds a clock and a privacy hub on top of
+them.
 
 ---
 
@@ -133,6 +134,56 @@ the vault is unlocked.
 Nothing else touches it: WebView2's own autofill and password autosave are
 disabled at the profile level.
 
+## The new-tab page
+
+Clock and date, the search field, the speed dial grid, then a privacy hub:
+
+| Tile | Source | Kind |
+|---|---|---|
+| Trackers & ads blocked | lifetime counter in SQLite | **measured** |
+| Bandwidth saved | blocked count x per-type average | *estimated* |
+| Time saved | blocked count and estimated bytes | *estimated* |
+| Browser memory | summed private commit of every WebView2 process | **measured** |
+| CPU right now | delta of process CPU time over the poll interval | **measured** |
+| Blocked this session / processes | in-memory counter | **measured** |
+
+### Why two of them are estimates, and how that is handled
+
+A blocked request is never issued, so its response never exists and its size is
+never known. Every browser showing "bandwidth saved" is multiplying a request
+count by an assumed average; the honest thing is to say so rather than present
+a fabricated number as a measurement.
+
+So: the assumptions live in `src/stats.rs` as named constants with the
+reasoning attached, the averages differ per resource type (a tracking pixel is
+not a video), the model is deliberately conservative — a test pins 12.6k
+blocked requests to single-digit minutes rather than the half-hour figures some
+browsers advertise — and both estimated tiles carry a footnote in the UI saying
+why they are estimates.
+
+### Memory: private commit, not working set
+
+`procstats.rs` sums `PrivateUsage` across every WebView2 process plus our own.
+Summing working sets would double-count heavily, because Chromium processes
+share a great deal of mapped memory, and the total would read far above what
+the browser actually costs.
+
+### Cost of the hub
+
+The page polls the host every 2 s and **stops entirely when the tab is not
+visible** — `visibilitychange` clears both the clock and the stats timer. A
+background new-tab page that keeps ticking is exactly the idle cost this
+browser exists to avoid, and nothing is sampled when no new-tab page is open.
+The poll interval doubles as the CPU averaging window, since CPU time is a
+counter and a rate needs two readings.
+
+Blocked-request counters never touch the database on the hot path: they
+accumulate in memory and flush when the hub polls, when 200 have piled up, on
+the reclaim tick, and at shutdown.
+
+Private windows report their session only, so an incognito hub never surfaces
+the main profile's totals.
+
 ## Design language
 
 Every animated property is `opacity` or `transform` — both composite on the GPU
@@ -188,12 +239,21 @@ cargo test
 
 This matters, so it is stated plainly.
 
-**Verified in CI-equivalent conditions:** 102 unit tests pass, covering the
+**Verified in CI-equivalent conditions:** 119 unit tests pass, covering the
 blocker (against real EasyList syntax, including exception rules, per-site
 allowlisting and cache invalidation), the vault (tamper detection, nonce
-freshness, no plaintext in the file), all four storage tables, the reclaim
-policy, omnibox parsing, the Chromium flag builder, and the JSON key contract
-between Rust and the UI.
+freshness, no plaintext in the file), all five storage tables including the v1
+to v2 migration, the reclaim policy, omnibox parsing, the Chromium flag
+builder, the statistics model (including an overflow the suite caught), and the
+JSON key contract between Rust and the UI.
+
+`python3 tools/check-ui.py` covers what the compiler cannot see across the
+Rust/JavaScript boundary: that every element id referenced from a script exists
+in its page, that every command the UI sends is a real `ipc::Command` variant,
+that every event it listens for is a real `ipc::Event` variant, and that every
+script parses. Each of those fails silently at runtime otherwise — a typo'd id
+yields `null`, an unknown command is dropped by `Command::parse`, an event
+nobody listens for simply never renders.
 
 **Type-checked against the real Win32 and WebView2 APIs** for
 `x86_64-pc-windows-gnu`, so every COM signature, interface cast and event
