@@ -162,6 +162,10 @@ pub enum Event<'a> {
     Vault { state: VaultState, #[serde(skip_serializing_if = "Option::is_none")] items: Option<Vec<CredentialSummary>> },
     /// Answer to an explicit reveal request.
     VaultSecret { id: i64, password: String },
+    /// Badge-only update while a page is loading. Deliberately minimal: the
+    /// full `Navigation` event carries the URL and title and would be far more
+    /// expensive to send at the rate requests are blocked.
+    Blocked { id: u32, count: u64 },
     BlockerStats { stats: Stats, enabled: bool },
     Privacy { stats: PrivacyStats },
     Settings { settings: SettingsView },
@@ -352,7 +356,6 @@ mod tests {
                 memory_bytes: 380_000_000,
                 cpu_percent: 3.5,
                 process_count: 6,
-                history_entries: 900,
                 blocking_enabled: true,
             },
         }
@@ -366,7 +369,6 @@ mod tests {
             r#""memoryBytes":380000000"#,
             r#""cpuPercent":3.5"#,
             r#""processCount":6"#,
-            r#""historyEntries":900"#,
             r#""blockingEnabled":true"#,
         ] {
             assert!(json.contains(key), "missing {key} in {json}");

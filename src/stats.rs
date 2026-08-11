@@ -101,8 +101,6 @@ pub struct PrivacyStats {
     /// How many processes that covers, including our own.
     pub process_count: u32,
 
-    /// Rows currently in the history table.
-    pub history_entries: u64,
     /// Whether blocking is on at all; the hub greys out when it is not.
     pub blocking_enabled: bool,
 }

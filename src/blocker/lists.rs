@@ -104,8 +104,17 @@ pub fn refresh(request: &RefreshRequest) -> Option<CompiledLists> {
 
     // Compiled here, on the worker thread: `Engine` is `!Send` under the
     // `single-thread` feature, so only the serialized bytes cross back.
-    let blocker = Blocker::compile(&lists);
+    //
+    // `compile` consumes the list text, and the blocker is dropped before the
+    // file is written. At this point the raw lists (~8 MB), the compiled engine
+    // and the serialized buffer would otherwise all be resident at once.
+    // Counted before the Vec is consumed: this is how many lists were actually
+    // compiled, which is not the number configured when a fetch failed and no
+    // local copy existed to fall back to.
+    let rule_sources = lists.len();
+    let blocker = Blocker::compile(lists);
     let engine = blocker.serialize();
+    drop(blocker);
 
     if let Some(parent) = request.cache_path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -117,7 +126,7 @@ pub fn refresh(request: &RefreshRequest) -> Option<CompiledLists> {
         let _ = fs::rename(&tmp, &request.cache_path);
     }
 
-    Some(CompiledLists { engine, rule_sources: lists.len() })
+    Some(CompiledLists { engine, rule_sources })
 }
 
 /// Where a background refresh leaves its result for the UI thread to collect.

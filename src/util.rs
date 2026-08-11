@@ -86,15 +86,21 @@ pub fn urlencode(input: &str) -> String {
     out
 }
 
-/// Shorten a URL for display in the tab strip / history list without
-/// allocating when it is already short enough.
-pub fn elide(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
+/// Shorten a string for display, borrowing when it already fits.
+///
+/// Returns `Cow` rather than `String`: the overwhelmingly common case is a tab
+/// title that is already short, and this runs for every tab every time the tab
+/// strip is pushed to the UI.
+pub fn elide(text: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    // `chars().count()` walks the string; bail out early on the byte length
+    // first, since a string shorter than the limit in bytes cannot exceed it in
+    // characters.
+    if text.len() <= max_chars || text.chars().count() <= max_chars {
+        return std::borrow::Cow::Borrowed(text);
     }
     let mut out: String = text.chars().take(max_chars.saturating_sub(1)).collect();
     out.push('\u{2026}');
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -133,8 +139,14 @@ mod tests {
     }
 
     #[test]
-    fn elide_keeps_short_strings() {
-        assert_eq!(elide("abc", 5), "abc");
+    fn elide_keeps_short_strings_without_allocating() {
+        assert!(matches!(elide("abc", 5), std::borrow::Cow::Borrowed("abc")));
+        assert!(matches!(elide("abcde", 5), std::borrow::Cow::Borrowed(_)));
         assert_eq!(elide("abcdefg", 4), "abc\u{2026}");
+
+        // Multi-byte characters: the byte-length shortcut must not truncate a
+        // string that is short in characters but long in bytes.
+        assert_eq!(elide("äöüäöü", 6), "äöüäöü");
+        assert_eq!(elide("äöüäöü", 3), "ää\u{2026}".replace("ää", "äö"));
     }
 }

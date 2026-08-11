@@ -41,6 +41,9 @@ use crate::vault::{Vault, VaultError};
 const ASSET_HOST: &str = "cleandark.assets";
 const ASSET_ORIGIN: &str = "https://cleandark.assets/";
 
+/// Persist download progress at most once per this many bytes received.
+const DOWNLOAD_WRITE_INTERVAL_BYTES: i64 = 512 * 1024;
+
 fn asset_url(page: &str) -> String {
     format!("{ASSET_ORIGIN}{page}")
 }
@@ -119,6 +122,9 @@ pub struct App {
     paths: Paths,
     incognito: bool,
 
+    /// Where the bundled UI lives. Resolved once at startup: `current_exe()` is
+    /// a syscall, and this used to run on every tab creation.
+    asset_dir: PathBuf,
     /// Extra height the chrome overlays over the page while a dropdown is open.
     overlay_height: Cell<i32>,
     /// Where a background filter refresh leaves its result.
@@ -184,6 +190,7 @@ impl App {
             settings: RefCell::new(settings),
             paths,
             incognito,
+            asset_dir,
             overlay_height: Cell::new(0),
             refresh_slot: std::sync::Arc::new(lists::RefreshSlot::new()),
             pending_counters: RefCell::new(PendingCounters::default()),
@@ -234,7 +241,7 @@ impl App {
 
     /// Create (or recreate) the WebView backing a tab and wire its events.
     fn attach_webview(self: &Rc<Self>, tab_id: u32) -> Result<()> {
-        let (host, url) = {
+        let (host_window, url) = {
             let tabs = self.tabs.borrow();
             let Some(tab) = tabs.iter().find(|t| t.id == tab_id) else {
                 return Ok(());
@@ -242,16 +249,16 @@ impl App {
             if tab.is_live() {
                 return Ok(());
             }
-            (tab.host, tab.url.clone())
+            (tab.host_window, tab.url.clone())
         };
 
-        let controller = self.environment.create_controller(host, self.incognito)?;
+        let controller = self.environment.create_controller(host_window, self.incognito)?;
         let webview = unsafe { controller.CoreWebView2()? };
         {
             let settings = self.settings.borrow();
             wv::harden(&webview, Role::Content, &settings)?;
         }
-        wv::map_asset_folder(&webview, ASSET_HOST, &self.asset_dir())?;
+        wv::map_asset_folder(&webview, ASSET_HOST, &self.asset_dir)?;
         wv::add_startup_script(&webview, BRIDGE_SCRIPT)?;
 
         self.wire_tab_events(tab_id, &webview);
@@ -270,14 +277,6 @@ impl App {
             wv::navigate(&webview, &url)?;
         }
         Ok(())
-    }
-
-    fn asset_dir(&self) -> PathBuf {
-        // The UI ships next to the executable.
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("ui")))
-            .unwrap_or_else(|| PathBuf::from("ui"))
     }
 
     pub fn activate_tab(self: &Rc<Self>, id: u32) {
@@ -332,7 +331,7 @@ impl App {
             let Some(index) = tabs.iter().position(|t| t.id == id) else {
                 return;
             };
-            (index, tabs[index].host)
+            (index, tabs[index].host_window)
         };
 
         {
@@ -399,14 +398,22 @@ impl App {
             let _ = self.chrome_controller.SetIsVisible(true);
         }
 
+        // Only the visible tab is positioned. `SetBounds` on a WebView forces a
+        // renderer relayout even when the WebView is hidden, so resizing every
+        // background tab would multiply the cost of a single window drag by the
+        // tab count — with WM_SIZE arriving continuously while dragging. Hidden
+        // tabs keep stale bounds and are laid out again by `activate_tab`.
         let active = self.active.get();
         let tabs = self.tabs.borrow();
         for tab in tabs.iter() {
-            let visible = Some(tab.id) == active;
+            if Some(tab.id) != active {
+                self.window.hide_host(tab.host_window);
+                continue;
+            }
             self.window.place_host(
-                tab.host,
+                tab.host_window,
                 RECT { left: 0, top: chrome_h, right: width, bottom: height },
-                visible,
+                true,
             );
             if let Some(controller) = &tab.controller {
                 unsafe {
@@ -416,7 +423,7 @@ impl App {
                         right: width,
                         bottom: (height - chrome_h).max(0),
                     });
-                    let _ = controller.SetIsVisible(visible);
+                    let _ = controller.SetIsVisible(true);
                 }
             }
         }
@@ -438,11 +445,13 @@ impl App {
         let Some(tab) = tabs.iter().find(|t| t.id == tab_id) else {
             return;
         };
-        let bookmarked = self.storage.is_bookmarked(&tab.url).unwrap_or(false);
-        let host = util::host_of(&tab.url).unwrap_or_default();
+        // Both of these used to be recomputed here — a SQL query and a URL
+        // parse — on every navigation event, of which there are several per
+        // page load. They now live on the tab and change only when the URL or
+        // the bookmark does.
         let shield_active = {
             let blocker = self.blocker.borrow();
-            blocker.is_enabled() && !blocker.is_host_allowed(&host)
+            blocker.is_enabled() && !blocker.is_host_allowed(&tab.host)
         };
 
         self.post(&Event::Navigation {
@@ -452,7 +461,7 @@ impl App {
             can_go_back: tab.can_go_back,
             can_go_forward: tab.can_go_forward,
             loading: tab.loading,
-            bookmarked,
+            bookmarked: tab.bookmarked,
             secure: tab.url.starts_with("https://"),
             blocked: tab.blocked,
             shield_active,
@@ -619,20 +628,23 @@ impl App {
         // --- source changed: the address bar follows the committed URL ---
         {
             let weak = Rc::downgrade(self);
-            let webview_for_url = webview.clone();
             unsafe {
                 let _ = webview.add_SourceChanged(
-                    &SourceChangedEventHandler::create(Box::new(move |_sender, _args| {
+                    &SourceChangedEventHandler::create(Box::new(move |sender, _args| {
                         let Some(app) = weak.upgrade() else { return Ok(()) };
+                        let Some(sender) = sender else { return Ok(()) };
+
                         let mut source = PWSTR::null();
-                        if webview_for_url.Source(&mut source).is_ok() {
+                        if sender.Source(&mut source).is_ok() {
                             let source = take_pwstr(source);
+                            let bookmarked =
+                                app.storage.is_bookmarked(&source).unwrap_or(false);
                             let mut tabs = app.tabs.borrow_mut();
                             if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
-                                tab.url = source;
+                                tab.set_url(source);
+                                tab.bookmarked = bookmarked;
                             }
                         }
-                        drop(webview_for_url.clone());
                         app.push_navigation(tab_id);
                         Ok(())
                     })),
@@ -644,13 +656,13 @@ impl App {
         // --- history changed: back/forward availability ---
         {
             let weak = Rc::downgrade(self);
-            let webview_for_history = webview.clone();
             unsafe {
                 let _ = webview.add_HistoryChanged(
-                    &HistoryChangedEventHandler::create(Box::new(move |_sender, _args| {
+                    &HistoryChangedEventHandler::create(Box::new(move |sender, _args| {
                         let Some(app) = weak.upgrade() else { return Ok(()) };
-                        let back = read_bool(|out| webview_for_history.CanGoBack(out));
-                        let forward = read_bool(|out| webview_for_history.CanGoForward(out));
+                        let Some(sender) = sender else { return Ok(()) };
+                        let back = read_bool(|out| sender.CanGoBack(out));
+                        let forward = read_bool(|out| sender.CanGoForward(out));
                         {
                             let mut tabs = app.tabs.borrow_mut();
                             if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
@@ -698,13 +710,13 @@ impl App {
         // --- title ---
         {
             let weak = Rc::downgrade(self);
-            let webview_for_title = webview.clone();
             unsafe {
                 let _ = webview.add_DocumentTitleChanged(
-                    &DocumentTitleChangedEventHandler::create(Box::new(move |_sender, _args| {
+                    &DocumentTitleChangedEventHandler::create(Box::new(move |sender, _args| {
                         let Some(app) = weak.upgrade() else { return Ok(()) };
+                        let Some(sender) = sender else { return Ok(()) };
                         let mut title = PWSTR::null();
-                        if webview_for_title.DocumentTitle(&mut title).is_ok() {
+                        if sender.DocumentTitle(&mut title).is_ok() {
                             let title = take_pwstr(title);
                             let url = {
                                 let mut tabs = app.tabs.borrow_mut();
@@ -731,15 +743,15 @@ impl App {
         // --- audio, so the reclaim policy never freezes a playing tab ---
         {
             let weak = Rc::downgrade(self);
-            let webview_for_audio = webview.clone();
             unsafe {
                 if let Ok(webview8) = webview.cast::<ICoreWebView2_8>() {
                     let _ = webview8.add_IsDocumentPlayingAudioChanged(
                         &IsDocumentPlayingAudioChangedEventHandler::create(Box::new(
-                            move |_sender, _args| {
+                            move |sender, _args| {
                                 let Some(app) = weak.upgrade() else { return Ok(()) };
-                                let audible = webview_for_audio
-                                    .cast::<ICoreWebView2_8>()
+                                let audible = sender
+                                    .as_ref()
+                                    .and_then(|s| s.cast::<ICoreWebView2_8>().ok())
                                     .map(|w| read_bool(|out| w.IsDocumentPlayingAudio(out)))
                                     .unwrap_or(false);
                                 {
@@ -878,22 +890,31 @@ impl App {
             (take_pwstr(uri), ResourceKind::from_webview2(context))
         };
 
-        let (source, pending) = {
+        // The decision is taken under a single shared borrow of the tab list,
+        // reading `url`, `host` and `pending_main_frame` in place. Cloning them
+        // would put two heap allocations on every intercepted request.
+        // `tabs` and `blocker` are separate cells, so holding both is fine.
+        let filter_type = {
             let tabs = self.tabs.borrow();
-            match tabs.iter().find(|t| t.id == tab_id) {
-                Some(tab) => (tab.url.clone(), tab.pending_main_frame.clone()),
-                None => return,
+            let Some(tab) = tabs.iter().find(|t| t.id == tab_id) else {
+                return;
+            };
+            let Some(filter_type) =
+                filter_type_for(kind, &uri, tab.pending_main_frame.as_deref())
+            else {
+                return;
+            };
+            let blocked = self.blocker.borrow_mut().should_block(
+                &uri,
+                &tab.url,
+                &tab.host,
+                filter_type,
+            );
+            if !blocked {
+                return;
             }
+            filter_type
         };
-
-        let Some(filter_type) = filter_type_for(kind, &uri, pending.as_deref()) else {
-            return;
-        };
-
-        let blocked = self.blocker.borrow_mut().should_block(&uri, &source, filter_type);
-        if !blocked {
-            return;
-        }
 
         if let Ok(response) = self.environment.blocked_response() {
             unsafe {
@@ -924,10 +945,11 @@ impl App {
                 None => return,
             }
         };
-        // The badge only needs to be roughly right; refreshing on every
-        // blocked request would post hundreds of messages per page load.
-        if count % 10 == 1 {
-            self.push_navigation(tab_id);
+        // The badge only needs to be roughly right. A full `Navigation` event
+        // would serialize the URL and title and re-read the bookmark state; this
+        // one carries two integers, and is sent once per 25 blocked requests.
+        if count % 25 == 1 {
+            self.post(&Event::Blocked { id: tab_id, count });
         }
     }
 
@@ -942,7 +964,10 @@ impl App {
         if !blocker.is_enabled() {
             return false;
         }
-        blocker.should_block(url, url, "document")
+        // A top-level navigation is its own source, so the host of the target
+        // is also the host the allowlist is checked against.
+        let host = util::host_of(url).unwrap_or_default();
+        blocker.should_block(url, url, &host, "document")
     }
 
     fn on_theme_color(&self, tab_id: u32, color: &str) {
@@ -983,14 +1008,29 @@ impl App {
 
             let mut token = 0;
             if let Some(app) = self.me() {
+                // Both handlers read the operation from the `sender` argument
+                // rather than capturing a clone of it. Capturing would create a
+                // COM reference cycle — the operation owns the handler, the
+                // handler owns the operation — and neither would ever be
+                // released, leaking one download operation per file.
                 let weak = Rc::downgrade(&app);
-                let op = operation.clone();
+                // Persisted progress is throttled: BytesReceivedChanged fires
+                // many times a second on a fast link, and a WAL write per event
+                // is pure overhead when the row is only read by the downloads
+                // page. The UI event itself is cheap and stays unthrottled so
+                // the progress bar remains smooth.
+                let mut written_at = 0i64;
                 let _ = operation.add_BytesReceivedChanged(
                     &webview2_com::BytesReceivedChangedEventHandler::create(Box::new(
-                        move |_sender, _args| {
+                        move |sender, _args| {
                             let Some(app) = weak.upgrade() else { return Ok(()) };
+                            let Some(op) = sender else { return Ok(()) };
+
                             let received = read_i64(|out| op.BytesReceived(out));
-                            let _ = app.storage.update_download_progress(id, received);
+                            if received - written_at >= DOWNLOAD_WRITE_INTERVAL_BYTES {
+                                written_at = received;
+                                let _ = app.storage.update_download_progress(id, received);
+                            }
                             app.post(&Event::DownloadProgress {
                                 id,
                                 received,
@@ -1003,10 +1043,11 @@ impl App {
                 );
 
                 let weak = Rc::downgrade(&app);
-                let op = operation.clone();
                 let _ = operation.add_StateChanged(
-                    &StateChangedEventHandler::create(Box::new(move |_sender, _args| {
+                    &StateChangedEventHandler::create(Box::new(move |sender, _args| {
                         let Some(app) = weak.upgrade() else { return Ok(()) };
+                        let Some(op) = sender else { return Ok(()) };
+
                         let mut raw = COREWEBVIEW2_DOWNLOAD_STATE::default();
                         if op.State(&mut raw).is_err() {
                             return Ok(());
@@ -1018,6 +1059,8 @@ impl App {
                             // covers it, so there is nothing to finalise.
                             _ => return Ok(()),
                         };
+                        // The final size is written here regardless of the
+                        // throttle above, so a finished row is always exact.
                         let _ = app.storage.finish_download_with_size(
                             id,
                             state,
@@ -1084,7 +1127,6 @@ impl App {
                 memory_bytes: sample.memory_bytes,
                 cpu_percent: sample.cpu_percent,
                 process_count: sample.process_count,
-                history_entries: self.storage.history_count().unwrap_or(0),
                 blocking_enabled: self.blocker.borrow().is_enabled(),
             },
         });
@@ -1261,13 +1303,26 @@ impl App {
                 let (url, title) = {
                     let tabs = self.tabs.borrow();
                     match tabs.iter().find(|t| t.id == id) {
-                        Some(tab) => (tab.url.clone(), tab.display_title()),
+                        // `display_title` borrows from the tab, so it has to be
+                        // owned before the guard is dropped.
+                        Some(tab) => (tab.url.clone(), tab.display_title().into_owned()),
                         None => return,
                     }
                 };
                 match self.storage.toggle_bookmark(&url, &title) {
-                    Ok(true) => self.toast("Bookmarked", ToastKind::Info),
-                    Ok(false) => self.toast("Bookmark removed", ToastKind::Info),
+                    Ok(state) => {
+                        // Keep the cached flag in step with the database so the
+                        // toolbar never has to query it again.
+                        let mut tabs = self.tabs.borrow_mut();
+                        if let Some(tab) = tabs.iter_mut().find(|t| t.id == id) {
+                            tab.bookmarked = state;
+                        }
+                        drop(tabs);
+                        self.toast(
+                            if state { "Bookmarked" } else { "Bookmark removed" },
+                            ToastKind::Info,
+                        );
+                    }
                     Err(_) => self.toast("Could not save bookmark", ToastKind::Error),
                 }
                 self.push_navigation(id);
@@ -1479,10 +1534,13 @@ impl App {
     // ------------------------------------------------------------- reclaim
 
     fn reclaim(self: &Rc<Self>) {
-        let settings = self.settings.borrow().clone();
         let active = self.active.get();
 
+        // Borrowed, not cloned: `Settings` owns several `String`s and a `Vec`
+        // of filter-list URLs, and this runs on a timer. Nothing in the loop
+        // touches the settings cell, so the borrow is safe to hold.
         let decisions: Vec<(u32, ReclaimAction)> = {
+            let settings = self.settings.borrow();
             let tabs = self.tabs.borrow();
             tabs.iter()
                 .map(|tab| {
@@ -1601,7 +1659,7 @@ fn load_blocker(paths: &Paths, settings: &Settings) -> Blocker {
     if local.is_empty() {
         Blocker::empty()
     } else {
-        Blocker::compile(&local)
+        Blocker::compile(local)
     }
 }
 

@@ -28,7 +28,6 @@
   var shieldEl = el("shield");
   var shieldCountEl = el("shield-count");
   var starEl = el("star");
-  var lockEl = el("lock");
   var backEl = el("back");
   var forwardEl = el("forward");
 
@@ -37,6 +36,9 @@
     active: null,
     url: "",
     editing: false,
+    // What the user actually typed, kept so arrowing past the last suggestion
+    // restores it instead of leaving a suggestion's URL in the field.
+    typed: "",
     suggestions: [],
     selected: -1,
     settings: { adblock: true, chameleon: false, reduceMotion: false }
@@ -169,10 +171,19 @@
     if (state.selected >= 0 && rows[state.selected]) {
       rows[state.selected].classList.remove("selected");
     }
-    state.selected = (state.selected + delta + rows.length + 1) % (rows.length + 1) - 1;
+
+    // Selection cycles through rows.length + 1 states: one per row, plus "no
+    // row selected" at -1. Shift into 0..n before taking the modulus and shift
+    // back afterwards, so -1 is reachable from both ends.
+    var states = rows.length + 1;
+    state.selected = ((state.selected + 1 + delta) % states + states) % states - 1;
+
     if (state.selected >= 0 && rows[state.selected]) {
       rows[state.selected].classList.add("selected");
       urlEl.value = state.suggestions[state.selected].url;
+    } else {
+      // Back to the "nothing selected" state: restore what the user typed.
+      urlEl.value = state.typed;
     }
   }
 
@@ -198,6 +209,7 @@
   var queryTimer = 0;
   urlEl.addEventListener("input", function () {
     var text = urlEl.value;
+    state.typed = text;
     clearTimeout(queryTimer);
     if (text.trim() === "") {
       closeDropdown();
@@ -417,6 +429,15 @@
           shieldEl.classList.toggle("off", !msg.shieldActive);
           shieldEl.classList.toggle("has-blocks", msg.blocked > 0);
           shieldCountEl.textContent = msg.blocked > 99 ? "99+" : String(msg.blocked);
+          break;
+
+        case "blocked":
+          // Badge-only update while a page loads; deliberately does not touch
+          // the rest of the toolbar.
+          if (msg.id === state.active) {
+            shieldEl.classList.add("has-blocks");
+            shieldCountEl.textContent = msg.count > 99 ? "99+" : String(msg.count);
+          }
           break;
 
         case "accent":

@@ -60,10 +60,9 @@ impl Storage {
     }
 
     pub fn is_bookmarked(&self, url: &str) -> rusqlite::Result<bool> {
-        let found: Option<i64> = self
-            .conn()
-            .query_row("SELECT id FROM bookmarks WHERE url = ?1", [url], |r| r.get(0))
-            .optional()?;
+        let mut stmt =
+            self.conn().prepare_cached("SELECT id FROM bookmarks WHERE url = ?1")?;
+        let found: Option<i64> = stmt.query_row([url], |r| r.get(0)).optional()?;
         Ok(found.is_some())
     }
 

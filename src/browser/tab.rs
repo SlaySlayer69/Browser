@@ -15,12 +15,18 @@ use crate::ipc::TabView;
 pub struct Tab {
     pub id: u32,
     /// Child window the controller draws into. Outlives discarding.
-    pub host: HWND,
+    pub host_window: HWND,
     /// `None` while discarded.
     pub controller: Option<ICoreWebView2Controller>,
     pub webview: Option<ICoreWebView2>,
 
     pub url: String,
+    /// Host of `url`, kept alongside it rather than derived on demand.
+    ///
+    /// The blocker needs it for every intercepted request; parsing the URL
+    /// there would put a full parse and a `String` allocation in front of every
+    /// cache lookup. Updated only when the URL changes — once per navigation.
+    pub host: String,
     pub title: String,
     pub loading: bool,
     pub can_go_back: bool,
@@ -38,13 +44,18 @@ pub struct Tab {
     pub blocked: u64,
     /// Last `<meta name="theme-color">` the page declared.
     pub theme_color: Option<String>,
+    /// Cached answer to "is this URL bookmarked". Refreshed when the URL
+    /// changes or the user toggles the star, so the toolbar can be updated
+    /// without a database round trip per navigation event.
+    pub bookmarked: bool,
 }
 
 impl Tab {
-    pub fn new(id: u32, host: HWND, url: String) -> Self {
+    pub fn new(id: u32, host_window: HWND, url: String) -> Self {
         Self {
             id,
-            host,
+            host: crate::util::host_of(&url).unwrap_or_default(),
+            host_window,
             controller: None,
             webview: None,
             title: String::new(),
@@ -58,8 +69,21 @@ impl Tab {
             pending_main_frame: None,
             blocked: 0,
             theme_color: None,
+            bookmarked: false,
             url,
         }
+    }
+
+    /// Change the URL and everything derived from it.
+    ///
+    /// The single place that keeps `host` in sync; assigning `url` directly
+    /// would silently leave the blocker matching against the previous page.
+    pub fn set_url(&mut self, url: String) {
+        if self.url == url {
+            return;
+        }
+        self.host = crate::util::host_of(&url).unwrap_or_default();
+        self.url = url;
     }
 
     pub fn is_live(&self) -> bool {
@@ -72,17 +96,25 @@ impl Tab {
 
     /// Label for the tab strip: the title if the page provided one, otherwise
     /// the host, otherwise a placeholder.
-    pub fn display_title(&self) -> String {
+    ///
+    /// Borrows in both of the common cases; only the empty-URL fallback owns.
+    pub fn display_title(&self) -> std::borrow::Cow<'_, str> {
         if !self.title.trim().is_empty() {
-            return self.title.clone();
+            return std::borrow::Cow::Borrowed(&self.title);
         }
-        crate::util::host_of(&self.url).unwrap_or_else(|| "New Tab".to_string())
+        if !self.host.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.host);
+        }
+        std::borrow::Cow::Borrowed("New Tab")
     }
 
     pub fn to_view(&self) -> TabView {
         TabView {
             id: self.id,
-            title: crate::util::elide(&self.display_title(), 60),
+            // One allocation for the wire format instead of three: the title
+            // is borrowed, elided in place when short enough, and only then
+            // copied into the event.
+            title: crate::util::elide(&self.display_title(), 60).into_owned(),
             url: self.url.clone(),
             loading: self.loading,
             asleep: self.power.is_asleep(),
@@ -116,6 +148,21 @@ mod tests {
         let mut t = Tab::new(1, HWND(std::ptr::null_mut()), url.to_string());
         t.title = title.to_string();
         t
+    }
+
+    #[test]
+    fn the_host_is_derived_once_and_kept_in_sync() {
+        let mut t = tab("https://Example.COM/a", "");
+        assert_eq!(t.host, "example.com");
+
+        t.set_url("https://other.test/b".to_string());
+        assert_eq!(t.host, "other.test");
+        assert_eq!(t.url, "https://other.test/b");
+
+        // A URL that cannot be parsed leaves an empty host rather than a stale
+        // one from the previous page.
+        t.set_url("about:blank".to_string());
+        assert_eq!(t.host, "");
     }
 
     #[test]

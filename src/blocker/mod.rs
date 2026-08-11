@@ -120,15 +120,19 @@ impl Blocker {
 
     /// Compile an engine from raw filter-list text.
     ///
+    /// Takes the lists by value: they are several megabytes each, and
+    /// `add_filter_list` consumes a `String` anyway, so borrowing here would
+    /// only force a full copy of every list.
+    ///
     /// [`RuleTypes::NetworkOnly`] drops cosmetic rules at parse time. We block
     /// before the request leaves the process and never inject element-hiding
     /// CSS, so keeping them would cost tens of megabytes of resident memory for
     /// rules we would never consult.
-    pub fn compile(lists: &[String]) -> Self {
+    pub fn compile(lists: Vec<String>) -> Self {
         let mut set = FilterSet::new(false);
         let opts = ParseOptions { rule_types: RuleTypes::NetworkOnly, ..ParseOptions::default() };
         for list in lists {
-            set.add_filter_list(list.clone(), opts);
+            set.add_filter_list(list, opts);
         }
         Self { engine: Engine::new_with_filter_set(set), ..Self::empty() }
     }
@@ -189,9 +193,9 @@ impl Blocker {
         }
     }
 
+    /// Case-insensitive without allocating: this runs on every cache miss.
     pub fn is_host_allowed(&self, host: &str) -> bool {
-        let host = host.to_ascii_lowercase();
-        self.allowlist.iter().any(|h| h == &host)
+        self.allowlist.iter().any(|h| h.eq_ignore_ascii_case(host))
     }
 
     pub fn stats(&self) -> Stats {
@@ -206,15 +210,28 @@ impl Blocker {
     /// The hot path. `true` means the request must not be issued.
     ///
     /// `resource_type` uses adblock's vocabulary ("script", "image", "xhr",
-    /// "sub_frame", ...); [`crate::engine::interceptor`] maps WebView2's
-    /// resource contexts onto it.
-    pub fn should_block(&mut self, url: &str, source_url: &str, resource_type: &str) -> bool {
+    /// "sub_frame", ...); [`crate::engine::resource`] maps WebView2's resource
+    /// contexts onto it.
+    ///
+    /// `source_host` is passed in rather than derived from `source_url`: the
+    /// caller already knows the host of the page it is loading, and parsing the
+    /// URL here would put a full URL parse plus a `String` allocation in front
+    /// of every cache lookup — including the hits this cache exists to make
+    /// cheap. `source_url` is still needed by the matcher itself, which decides
+    /// first- versus third-party from the full URL.
+    pub fn should_block(
+        &mut self,
+        url: &str,
+        source_url: &str,
+        source_host: &str,
+        resource_type: &str,
+    ) -> bool {
         if !self.enabled {
             return false;
         }
         self.checked += 1;
 
-        let key = cache_key(url, source_url, resource_type);
+        let key = cache_key(url, source_host, resource_type);
         if let Some(hit) = self.cache.get(key) {
             if hit {
                 self.blocked += 1;
@@ -222,7 +239,7 @@ impl Blocker {
             return hit;
         }
 
-        let verdict = self.evaluate(url, source_url, resource_type);
+        let verdict = self.evaluate(url, source_url, source_host, resource_type);
         self.cache.put(key, verdict);
         if verdict {
             self.blocked += 1;
@@ -230,13 +247,17 @@ impl Blocker {
         verdict
     }
 
-    fn evaluate(&self, url: &str, source_url: &str, resource_type: &str) -> bool {
+    fn evaluate(
+        &self,
+        url: &str,
+        source_url: &str,
+        source_host: &str,
+        resource_type: &str,
+    ) -> bool {
         // A page-level exception disables blocking for everything that page
         // loads, matching what users expect from a per-site shield toggle.
-        if let Some(host) = crate::util::host_of(source_url) {
-            if self.is_host_allowed(&host) {
-                return false;
-            }
+        if !source_host.is_empty() && self.is_host_allowed(source_host) {
+            return false;
         }
 
         // An unparseable URL is not something we can reason about; letting it
@@ -250,11 +271,11 @@ impl Blocker {
 }
 
 #[inline]
-fn cache_key(url: &str, source_url: &str, resource_type: &str) -> u64 {
-    // Source URL is folded in via its host only: the verdict depends on
-    // first-party vs third-party and on the page's domain, not on its path.
-    // Doing so makes every subresource on a page share cache entries.
-    let source_host = crate::util::host_of(source_url).unwrap_or_default();
+fn cache_key(url: &str, source_host: &str, resource_type: &str) -> u64 {
+    // Only the source *host* is folded in: the verdict depends on first-party
+    // vs third-party and on the page's domain, never on its path. That makes
+    // every subresource on a page share cache entries, and keeps this function
+    // allocation-free.
     let mut key = fnv1a(url.as_bytes(), FNV_OFFSET);
     key = fnv1a(source_host.as_bytes(), key);
     key = fnv1a(resource_type.as_bytes(), key);
@@ -268,55 +289,58 @@ mod tests {
     const RULES: &str = "||ads.example.com^\n||tracker.test/pixel.gif\n@@||ads.example.com/allowed^";
 
     fn blocker() -> Blocker {
-        Blocker::compile(&[RULES.to_string()])
+        Blocker::compile(vec![RULES.to_string()])
+    }
+
+    /// The app keeps the page host on the tab; tests derive it once here so the
+    /// call sites stay readable.
+    fn check(b: &mut Blocker, url: &str, source: &str, kind: &str) -> bool {
+        let host = crate::util::host_of(source).unwrap_or_default();
+        b.should_block(url, source, &host, kind)
     }
 
     #[test]
     fn blocks_matching_third_party_requests() {
         let mut b = blocker();
-        assert!(b.should_block("https://ads.example.com/banner.js", "https://news.test/", "script"));
+        assert!(check(&mut b, "https://ads.example.com/banner.js", "https://news.test/", "script"));
     }
 
     #[test]
     fn honours_exception_rules() {
         let mut b = blocker();
-        assert!(!b.should_block(
-            "https://ads.example.com/allowed/x.js",
-            "https://news.test/",
-            "script"
-        ));
+        assert!(!check(&mut b, "https://ads.example.com/allowed/x.js", "https://news.test/", "script"));
     }
 
     #[test]
     fn leaves_unrelated_requests_alone() {
         let mut b = blocker();
-        assert!(!b.should_block("https://news.test/app.js", "https://news.test/", "script"));
+        assert!(!check(&mut b, "https://news.test/app.js", "https://news.test/", "script"));
     }
 
     #[test]
     fn disabled_blocker_blocks_nothing() {
         let mut b = blocker();
         b.set_enabled(false);
-        assert!(!b.should_block("https://ads.example.com/banner.js", "https://news.test/", "script"));
+        assert!(!check(&mut b, "https://ads.example.com/banner.js", "https://news.test/", "script"));
     }
 
     #[test]
     fn per_site_allowlist_disables_blocking_for_that_page() {
         let mut b = blocker();
         b.allow_host("news.test");
-        assert!(!b.should_block("https://ads.example.com/banner.js", "https://news.test/", "script"));
+        assert!(!check(&mut b, "https://ads.example.com/banner.js", "https://news.test/", "script"));
         // ...but only for that page.
-        assert!(b.should_block("https://ads.example.com/banner.js", "https://other.test/", "script"));
+        assert!(check(&mut b, "https://ads.example.com/banner.js", "https://other.test/", "script"));
 
         b.remove_host_exception("news.test");
-        assert!(b.should_block("https://ads.example.com/banner.js", "https://news.test/", "script"));
+        assert!(check(&mut b, "https://ads.example.com/banner.js", "https://news.test/", "script"));
     }
 
     #[test]
     fn repeated_requests_hit_the_cache() {
         let mut b = blocker();
         for _ in 0..10 {
-            b.should_block("https://ads.example.com/banner.js", "https://news.test/", "script");
+            check(&mut b, "https://ads.example.com/banner.js", "https://news.test/", "script");
         }
         let stats = b.stats();
         assert_eq!(stats.checked, 10);
@@ -328,32 +352,61 @@ mod tests {
     #[test]
     fn cache_is_invalidated_when_policy_changes() {
         let mut b = blocker();
-        assert!(b.should_block("https://ads.example.com/a.js", "https://news.test/", "script"));
+        assert!(check(&mut b, "https://ads.example.com/a.js", "https://news.test/", "script"));
         b.allow_host("news.test");
         // Stale cache would still say "block" here.
-        assert!(!b.should_block("https://ads.example.com/a.js", "https://news.test/", "script"));
+        assert!(!check(&mut b, "https://ads.example.com/a.js", "https://news.test/", "script"));
+    }
+
+    #[test]
+    fn the_hot_path_does_not_parse_the_source_url() {
+        // Regression guard for the reason `source_host` is a parameter: an
+        // empty host must not be treated as "allowlisted", and must not make
+        // the blocker fall back to parsing anything.
+        let mut b = blocker();
+        assert!(b.should_block("https://ads.example.com/a.js", "", "", "script"));
+
+        // An allowlist entry only applies when the caller supplies the host.
+        b.allow_host("news.test");
+        assert!(b.should_block("https://ads.example.com/a.js", "https://news.test/", "", "script"));
+        assert!(!b.should_block(
+            "https://ads.example.com/a.js",
+            "https://news.test/",
+            "news.test",
+            "script"
+        ));
+    }
+
+    #[test]
+    fn allowlist_matching_is_case_insensitive_without_allocating() {
+        let mut b = blocker();
+        b.allow_host("News.TEST");
+        assert!(b.is_host_allowed("news.test"));
+        assert!(b.is_host_allowed("NEWS.test"));
+        assert!(!b.is_host_allowed("other.test"));
     }
 
     #[test]
     fn cache_key_separates_resource_types_and_first_party_context() {
-        let a = cache_key("https://x.test/a", "https://p.test/1", "script");
-        assert_ne!(a, cache_key("https://x.test/a", "https://p.test/1", "image"));
-        assert_ne!(a, cache_key("https://x.test/a", "https://q.test/1", "script"));
-        // Same page, different path -> same key, so subresources share entries.
-        assert_eq!(a, cache_key("https://x.test/a", "https://p.test/2", "script"));
+        let a = cache_key("https://x.test/a", "p.test", "script");
+        assert_ne!(a, cache_key("https://x.test/a", "p.test", "image"));
+        assert_ne!(a, cache_key("https://x.test/a", "q.test", "script"));
+        // Same host -> same key, so every subresource on a page shares entries
+        // regardless of the page's path.
+        assert_eq!(a, cache_key("https://x.test/a", "p.test", "script"));
     }
 
     #[test]
     fn malformed_urls_are_allowed_through() {
         let mut b = blocker();
-        assert!(!b.should_block("", "https://news.test/", "script"));
-        assert!(!b.should_block("not a url", "https://news.test/", "script"));
+        assert!(!check(&mut b, "", "https://news.test/", "script"));
+        assert!(!check(&mut b, "not a url", "https://news.test/", "script"));
     }
 
     #[test]
     fn empty_engine_blocks_nothing() {
         let mut b = Blocker::empty();
-        assert!(!b.should_block("https://ads.example.com/banner.js", "https://news.test/", "script"));
+        assert!(!check(&mut b, "https://ads.example.com/banner.js", "https://news.test/", "script"));
     }
 
     #[test]
@@ -361,10 +414,7 @@ mod tests {
         let original = blocker();
         let bytes = original.serialize();
         let mut restored = Blocker::from_serialized(&bytes).expect("deserialize");
-        assert!(restored.should_block(
-            "https://ads.example.com/banner.js",
-            "https://news.test/",
-            "script"
-        ));
+        let _ = &mut restored;
+        assert!(check(&mut restored, "https://ads.example.com/banner.js", "https://news.test/", "script"));
     }
 }

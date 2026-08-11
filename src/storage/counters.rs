@@ -18,11 +18,10 @@ pub const BYTES_SAVED_TOTAL: &str = "bytes_saved_total";
 impl Storage {
     /// Read a counter. A counter that was never written reads as zero.
     pub fn counter(&self, key: &str) -> rusqlite::Result<u64> {
-        let value: i64 = self.conn().query_row(
+        let mut stmt = self.conn().prepare_cached(
             "SELECT COALESCE((SELECT value FROM counters WHERE key = ?1), 0)",
-            [key],
-            |row| row.get(0),
         )?;
+        let value: i64 = stmt.query_row([key], |row| row.get(0))?;
         // Counters are only ever incremented; a negative value would mean the
         // file was edited by hand. Clamp rather than wrap into a huge u64.
         Ok(value.max(0) as u64)
@@ -44,13 +43,6 @@ impl Storage {
     pub fn reset_counters(&self) -> rusqlite::Result<()> {
         self.conn().execute("DELETE FROM counters", [])?;
         Ok(())
-    }
-
-    /// Number of rows in the history table, for the hub's fourth tile.
-    pub fn history_count(&self) -> rusqlite::Result<u64> {
-        let count: i64 =
-            self.conn().query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))?;
-        Ok(count.max(0) as u64)
     }
 }
 
@@ -119,13 +111,13 @@ mod tests {
     }
 
     #[test]
-    fn history_count_tracks_the_table() {
+    fn counters_are_read_through_a_cached_statement() {
+        // Exercises the prepared-statement path more than once; this is polled
+        // by the privacy hub every couple of seconds.
         let s = storage();
-        assert_eq!(s.history_count().unwrap(), 0);
-        s.record_visit("https://a.test/", "A").unwrap();
-        s.record_visit("https://b.test/", "B").unwrap();
-        // Deduplicated by URL, so a revisit does not bump the count.
-        s.record_visit("https://a.test/", "A").unwrap();
-        assert_eq!(s.history_count().unwrap(), 2);
+        s.add_counter(BLOCKED_TOTAL, 1).unwrap();
+        for _ in 0..5 {
+            assert_eq!(s.counter(BLOCKED_TOTAL).unwrap(), 1);
+        }
     }
 }

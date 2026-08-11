@@ -260,6 +260,17 @@ impl MainWindow {
         }
     }
 
+    /// Hide a child host without touching its position.
+    ///
+    /// Used for background tabs during layout: `ShowWindow(SW_HIDE)` on an
+    /// already-hidden window is a no-op inside Windows, whereas `SetWindowPos`
+    /// is not.
+    pub fn hide_host(&self, host: HWND) {
+        unsafe {
+            let _ = ShowWindow(host, SW_HIDE);
+        }
+    }
+
     /// Start (or restart) the reclaim timer. `interval_ms == 0` stops it.
     pub fn set_reclaim_timer(&self, interval_ms: u32) {
         unsafe {
