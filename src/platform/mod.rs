@@ -5,5 +5,6 @@
 //! vault, config, IPC) does not depend on this module.
 
 pub mod http;
+pub mod procstats;
 pub mod shell;
 pub mod window;

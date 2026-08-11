@@ -1,12 +1,14 @@
-//! Local, on-disk state: history, downloads, bookmarks and speed dials.
+//! Local, on-disk state: history, downloads, bookmarks, speed dials and the
+//! lifetime privacy counters.
 //!
-//! One SQLite file holds all four. SQLite is the right size of tool here: a
+//! One SQLite file holds all of it. SQLite is the right size of tool here: a
 //! ~700 KB statically linked engine with a page cache we cap explicitly, versus
 //! four hand-rolled file formats that would each need their own crash-safety
 //! story. Nothing is ever written for an incognito window — see
 //! [`Storage::in_memory`].
 
 mod bookmarks;
+pub mod counters;
 mod downloads;
 mod history;
 mod speeddial;
@@ -21,7 +23,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 /// Schema version. Bump when adding a migration to [`migrate`].
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Storage {
     conn: Connection,
@@ -117,6 +119,17 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    if version < 2 {
+        // Lifetime privacy counters. A key/value table rather than columns so
+        // adding a counter later does not need another migration.
+        conn.execute_batch(
+            "CREATE TABLE counters (
+                 key   TEXT    PRIMARY KEY,
+                 value INTEGER NOT NULL DEFAULT 0
+             );",
+        )?;
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -124,6 +137,21 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrating_an_existing_v1_database_keeps_its_data() {
+        // A v1 profile in the wild has no `counters` table. Opening it must add
+        // one without touching the rows that are already there.
+        let storage = Storage::in_memory().unwrap();
+        storage.conn().execute_batch("DROP TABLE counters").unwrap();
+        storage.conn().pragma_update(None, "user_version", 1).unwrap();
+        storage.record_visit("https://kept.test/", "Kept").unwrap();
+
+        migrate(storage.conn()).unwrap();
+
+        assert_eq!(storage.recent_history(10).unwrap().len(), 1);
+        assert_eq!(storage.counter("blocked_total").unwrap(), 0);
+    }
 
     #[test]
     fn migration_is_idempotent() {

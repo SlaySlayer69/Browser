@@ -30,8 +30,10 @@ use crate::engine::environment::Environment;
 use crate::engine::resource::{filter_type_for, ResourceKind};
 use crate::engine::webview::{self as wv, Role};
 use crate::ipc::{Command, Event, SettingsView, ToastKind, VaultState};
+use crate::platform::procstats::ProcessSampler;
 use crate::platform::window::{self, MainWindow, WindowDelegate, WM_APP_FILTERS_READY};
-use crate::storage::{DownloadState, Storage};
+use crate::stats::{self, PendingCounters, PrivacyStats};
+use crate::storage::{counters, DownloadState, Storage};
 use crate::util;
 use crate::vault::{Vault, VaultError};
 
@@ -122,6 +124,13 @@ pub struct App {
     /// Where a background filter refresh leaves its result.
     refresh_slot: std::sync::Arc<lists::RefreshSlot>,
 
+    /// Blocked-request totals not yet written to the database.
+    pending_counters: RefCell<PendingCounters>,
+    /// Blocked requests since this window opened.
+    session_blocked: Cell<u64>,
+    /// Holds the previous CPU reading so a rate can be derived.
+    sampler: RefCell<ProcessSampler>,
+
     self_ref: RefCell<Weak<App>>,
 }
 
@@ -177,6 +186,9 @@ impl App {
             incognito,
             overlay_height: Cell::new(0),
             refresh_slot: std::sync::Arc::new(lists::RefreshSlot::new()),
+            pending_counters: RefCell::new(PendingCounters::default()),
+            session_blocked: Cell::new(0),
+            sampler: RefCell::new(ProcessSampler::new()),
             self_ref: RefCell::new(Weak::new()),
         });
         *app.self_ref.borrow_mut() = Rc::downgrade(&app);
@@ -889,6 +901,19 @@ impl App {
             }
         }
 
+        // Lifetime counters accumulate in memory; writing a database row per
+        // blocked request would put a write on the page-load hot path.
+        self.session_blocked.set(self.session_blocked.get().saturating_add(1));
+        {
+            let mut pending = self.pending_counters.borrow_mut();
+            pending.record(filter_type);
+            if pending.should_flush() {
+                let (requests, bytes) = pending.take();
+                drop(pending);
+                self.write_counters(requests, bytes);
+            }
+        }
+
         let count = {
             let mut tabs = self.tabs.borrow_mut();
             match tabs.iter_mut().find(|t| t.id == tab_id) {
@@ -1009,6 +1034,60 @@ impl App {
             self.push_downloads();
             self.toast("Download started", ToastKind::Info);
         }
+    }
+
+    /// Persist accumulated counters. Incognito windows never write.
+    fn write_counters(&self, requests: u64, bytes: u64) {
+        if self.incognito || requests == 0 {
+            return;
+        }
+        let _ = self.storage.add_counter(counters::BLOCKED_TOTAL, requests);
+        let _ = self.storage.add_counter(counters::BYTES_SAVED_TOTAL, bytes);
+    }
+
+    fn flush_counters(&self) {
+        // Checked before taking a mutable borrow: this runs on every reclaim
+        // tick, and the common case is that nothing has accumulated.
+        if self.pending_counters.borrow().is_empty() {
+            return;
+        }
+        let (requests, bytes) = self.pending_counters.borrow_mut().take();
+        self.write_counters(requests, bytes);
+    }
+
+    /// Gather everything the privacy hub shows.
+    ///
+    /// Called from the new-tab page's poll, so the poll interval is also the
+    /// CPU averaging window. Nothing here runs when no new-tab page is open.
+    fn push_privacy_stats(&self) {
+        self.flush_counters();
+
+        let sample = self.sampler.borrow_mut().sample(&self.environment.process_ids());
+
+        // An incognito window has no persisted history, so its hub shows the
+        // session only rather than leaking the main profile's totals.
+        let (blocked_total, bytes_saved) = if self.incognito {
+            (self.session_blocked.get(), 0)
+        } else {
+            (
+                self.storage.counter(counters::BLOCKED_TOTAL).unwrap_or(0),
+                self.storage.counter(counters::BYTES_SAVED_TOTAL).unwrap_or(0),
+            )
+        };
+
+        self.post(&Event::Privacy {
+            stats: PrivacyStats {
+                blocked_total,
+                blocked_session: self.session_blocked.get(),
+                bytes_saved,
+                time_saved_ms: stats::estimated_time_saved_ms(blocked_total, bytes_saved),
+                memory_bytes: sample.memory_bytes,
+                cpu_percent: sample.cpu_percent,
+                process_count: sample.process_count,
+                history_entries: self.storage.history_count().unwrap_or(0),
+                blocking_enabled: self.blocker.borrow().is_enabled(),
+            },
+        });
     }
 
     fn push_downloads(&self) {
@@ -1315,6 +1394,16 @@ impl App {
                 self.post(&Event::BlockerStats { stats, enabled });
             }
 
+            // ---- privacy hub ----
+            Command::QueryPrivacyStats => self.push_privacy_stats(),
+            Command::ResetPrivacyStats => {
+                self.pending_counters.borrow_mut().take();
+                self.session_blocked.set(0);
+                let _ = self.storage.reset_counters();
+                self.toast("Privacy statistics reset", ToastKind::Info);
+                self.push_privacy_stats();
+            }
+
             // ---- settings ----
             Command::QuerySettings => self.push_settings(),
             Command::SetChameleon { enabled } => {
@@ -1460,6 +1549,9 @@ impl WindowDelegate for App {
     }
 
     fn on_reclaim_tick(&self) {
+        // Cheap, and it bounds how much counter progress a crash can lose when
+        // the new-tab page is not open to trigger a flush of its own.
+        self.flush_counters();
         if let Some(app) = self.me() {
             app.reclaim();
         }
@@ -1484,6 +1576,7 @@ impl WindowDelegate for App {
     fn on_close(&self) -> bool {
         // Incognito state lives only in memory, so there is nothing to flush.
         if !self.incognito {
+            self.flush_counters();
             self.save_settings();
         }
         true

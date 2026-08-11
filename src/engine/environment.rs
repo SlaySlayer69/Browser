@@ -152,6 +152,36 @@ impl Environment {
         Ok(controller)
     }
 
+    /// Process ids of every process this environment owns: the browser
+    /// process, the GPU process, the network service and one renderer per site.
+    ///
+    /// Returns an empty list on runtimes older than 1.0.1108.44, where the
+    /// privacy hub simply reports our own process only.
+    pub fn process_ids(&self) -> Vec<u32> {
+        let Ok(environment8) = self.inner.cast::<ICoreWebView2Environment8>() else {
+            return Vec::new();
+        };
+        unsafe {
+            let Ok(collection) = environment8.GetProcessInfos() else {
+                return Vec::new();
+            };
+            let mut count = 0u32;
+            if collection.Count(&mut count).is_err() {
+                return Vec::new();
+            }
+
+            let mut pids = Vec::with_capacity(count as usize);
+            for index in 0..count {
+                let Ok(info) = collection.GetValueAtIndex(index) else { continue };
+                let mut pid = 0i32;
+                if info.ProcessId(&mut pid).is_ok() && pid > 0 {
+                    pids.push(pid as u32);
+                }
+            }
+            pids
+        }
+    }
+
     /// The response handed back for a blocked request.
     ///
     /// An empty 403 rather than a failed request: a failure surfaces as a

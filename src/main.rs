@@ -20,6 +20,7 @@ mod engine;
 mod ipc;
 #[cfg(windows)]
 mod platform;
+mod stats;
 mod storage;
 mod util;
 mod vault;

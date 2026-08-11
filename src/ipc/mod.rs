@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::blocker::Stats;
+use crate::stats::PrivacyStats;
 use crate::storage::{Bookmark, Download, SpeedDial, Visit};
 use crate::vault::CredentialSummary;
 
@@ -103,6 +104,12 @@ pub enum Command {
     SetShieldForHost { host: String, blocking: bool },
     SetAdblockEnabled { enabled: bool },
 
+    // ---- Privacy hub --------------------------------------------------------
+    /// Polled by the new-tab page while it is visible. Sampling CPU needs two
+    /// readings, so the polling interval doubles as the averaging window.
+    QueryPrivacyStats,
+    ResetPrivacyStats,
+
     // ---- Settings ----------------------------------------------------------
     QuerySettings,
     SetChameleon { enabled: bool },
@@ -156,6 +163,7 @@ pub enum Event<'a> {
     /// Answer to an explicit reveal request.
     VaultSecret { id: i64, password: String },
     BlockerStats { stats: Stats, enabled: bool },
+    Privacy { stats: PrivacyStats },
     Settings { settings: SettingsView },
 
     /// Transient message in the chrome; the UI decides how to show it.
@@ -329,6 +337,52 @@ mod tests {
             updated_at: 11,
         };
         assert!(serde_json::to_string(&credential).unwrap().contains(r#""updatedAt":11"#));
+    }
+
+    #[test]
+    fn privacy_stats_serialize_the_keys_the_hub_reads() {
+        // ui/newtab.js indexes these by name; a rename here is invisible until
+        // the hub renders "NaN".
+        let json = Event::Privacy {
+            stats: crate::stats::PrivacyStats {
+                blocked_total: 12_600,
+                blocked_session: 42,
+                bytes_saved: 34_500_000,
+                time_saved_ms: 165_000,
+                memory_bytes: 380_000_000,
+                cpu_percent: 3.5,
+                process_count: 6,
+                history_entries: 900,
+                blocking_enabled: true,
+            },
+        }
+        .to_json();
+
+        for key in [
+            r#""blockedTotal":12600"#,
+            r#""blockedSession":42"#,
+            r#""bytesSaved":34500000"#,
+            r#""timeSavedMs":165000"#,
+            r#""memoryBytes":380000000"#,
+            r#""cpuPercent":3.5"#,
+            r#""processCount":6"#,
+            r#""historyEntries":900"#,
+            r#""blockingEnabled":true"#,
+        ] {
+            assert!(json.contains(key), "missing {key} in {json}");
+        }
+    }
+
+    #[test]
+    fn privacy_commands_parse() {
+        assert!(matches!(
+            Command::parse(r#"{"cmd":"queryPrivacyStats"}"#),
+            Some(Command::QueryPrivacyStats)
+        ));
+        assert!(matches!(
+            Command::parse(r#"{"cmd":"resetPrivacyStats"}"#),
+            Some(Command::ResetPrivacyStats)
+        ));
     }
 
     #[test]
