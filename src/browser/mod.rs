@@ -1,5 +1,6 @@
 //! Browser orchestration: window, tabs, and the memory-reclaim policy.
 
+pub mod pending;
 pub mod reclaim;
 
 #[cfg(windows)]

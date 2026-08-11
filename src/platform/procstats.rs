@@ -19,8 +19,8 @@ use std::time::Instant;
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_VM_READ,
+    GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess,
+    SetProcessWorkingSetSize, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -182,5 +182,20 @@ mod tests {
         // PID 0 is the system idle process and cannot be opened this way.
         let stats = sampler.sample(&[0, u32::MAX]);
         assert_eq!(stats.process_count, 1, "only our own process should count");
+    }
+}
+
+/// Ask Windows to page out our own working set.
+///
+/// Called when the window is minimized. Passing `(SIZE_T)-1` for both bounds is
+/// the documented way to say "trim as far as you like": the pages stay valid
+/// and are faulted back in on demand, so the cost is paid only if the user
+/// comes back — which, for a minimized window, is exactly the right trade.
+///
+/// Deliberately *not* called periodically. Trimming a process that is actively
+/// working just buys a page-fault storm a moment later.
+pub fn trim_working_set() {
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
 }

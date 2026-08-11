@@ -23,6 +23,7 @@ use windows::core::{Interface, Result, PWSTR};
 use windows::Win32::Foundation::{HWND, RECT};
 
 use crate::blocker::{lists, Blocker};
+use crate::browser::pending::PendingUi;
 use crate::browser::reclaim::{self, ReclaimAction, TabPower, TabState};
 use crate::browser::tab::Tab;
 use crate::config::{Paths, ReclaimMode, Settings};
@@ -30,8 +31,10 @@ use crate::engine::environment::Environment;
 use crate::engine::resource::{filter_type_for, ResourceKind};
 use crate::engine::webview::{self as wv, Role};
 use crate::ipc::{Command, Event, SettingsView, ToastKind, VaultState};
-use crate::platform::procstats::ProcessSampler;
-use crate::platform::window::{self, MainWindow, WindowDelegate, WM_APP_FILTERS_READY};
+use crate::platform::procstats::{self, ProcessSampler};
+use crate::platform::window::{
+    self, MainWindow, WindowDelegate, WM_APP_FILTERS_READY, WM_APP_FLUSH_UI,
+};
 use crate::stats::{self, PendingCounters, PrivacyStats};
 use crate::storage::{counters, DownloadState, Storage};
 use crate::util;
@@ -137,6 +140,12 @@ pub struct App {
     /// Holds the previous CPU reading so a rate can be derived.
     sampler: RefCell<ProcessSampler>,
 
+    /// Chrome updates marked but not yet sent. See [`crate::browser::pending`].
+    ui_pending: RefCell<PendingUi>,
+    /// A minimized window paints nothing, so even its foreground tab becomes
+    /// reclaimable.
+    minimized: Cell<bool>,
+
     self_ref: RefCell<Weak<App>>,
 }
 
@@ -196,6 +205,8 @@ impl App {
             pending_counters: RefCell::new(PendingCounters::default()),
             session_blocked: Cell::new(0),
             sampler: RefCell::new(ProcessSampler::new()),
+            ui_pending: RefCell::new(PendingUi::default()),
+            minimized: Cell::new(false),
             self_ref: RefCell::new(Weak::new()),
         });
         *app.self_ref.borrow_mut() = Rc::downgrade(&app);
@@ -207,9 +218,6 @@ impl App {
 
         app.layout();
         app.window.show();
-        app.window
-            .set_reclaim_timer(reclaim::tick_interval_ms(&app.settings.borrow()));
-
         app.open_tab(&asset_url("newtab.html"), true)?;
         app.spawn_filter_refresh();
 
@@ -234,7 +242,8 @@ impl App {
             self.activate_tab(id);
         } else {
             self.layout();
-            self.push_tabs();
+            self.mark_tabs();
+            self.update_reclaim_timer();
         }
         Ok(id)
     }
@@ -321,8 +330,9 @@ impl App {
         }
 
         self.layout();
-        self.push_tabs();
-        self.push_navigation(id);
+        self.mark_tabs();
+        self.mark_navigation(id);
+        self.update_reclaim_timer();
     }
 
     pub fn close_tab(self: &Rc<Self>, id: u32) {
@@ -358,8 +368,9 @@ impl App {
             self.activate_tab(next);
         } else {
             self.layout();
-            self.push_tabs();
+            self.mark_tabs();
         }
+        self.update_reclaim_timer();
     }
 
     fn tab_webview(&self, id: u32) -> Option<ICoreWebView2> {
@@ -433,6 +444,52 @@ impl App {
 
     fn post(&self, event: &Event<'_>) {
         let _ = wv::post_json(&self.chrome, &event.to_json());
+    }
+
+    /// Mark chrome state as stale and make sure exactly one flush is queued.
+    ///
+    /// The message is posted only on the empty -> non-empty transition, so a
+    /// burst of twenty events during a page load queues one message, not twenty.
+    fn mark<F: FnOnce(&mut PendingUi)>(&self, mark: F) {
+        let should_post = {
+            let mut pending = self.ui_pending.borrow_mut();
+            let was_empty = pending.is_empty();
+            mark(&mut pending);
+            was_empty && !pending.is_empty()
+        };
+        if should_post {
+            MainWindow::post_app_message(self.window.hwnd(), WM_APP_FLUSH_UI);
+        }
+    }
+
+    fn mark_tabs(&self) {
+        self.mark(PendingUi::mark_tabs);
+    }
+
+    /// Only the active tab's toolbar state is ever rendered, so marking a
+    /// background tab would be work thrown away at flush time.
+    fn mark_navigation(&self, tab_id: u32) {
+        if self.active.get() == Some(tab_id) {
+            self.mark(|pending| pending.mark_navigation(tab_id));
+        }
+    }
+
+    fn mark_downloads(&self) {
+        self.mark(PendingUi::mark_downloads);
+    }
+
+    /// Send everything that was marked since the last flush.
+    fn flush_ui(&self) {
+        let pending = self.ui_pending.borrow_mut().take();
+        if pending.tabs {
+            self.push_tabs();
+        }
+        if let Some(tab_id) = pending.navigation {
+            self.push_navigation(tab_id);
+        }
+        if pending.downloads {
+            self.push_downloads();
+        }
     }
 
     fn push_tabs(&self) {
@@ -616,8 +673,8 @@ impl App {
                                 }
                             }
                         }
-                        app.push_tabs();
-                        app.push_navigation(tab_id);
+                        app.mark_tabs();
+                        app.mark_navigation(tab_id);
                         Ok(())
                     })),
                     &mut token,
@@ -645,7 +702,7 @@ impl App {
                                 tab.bookmarked = bookmarked;
                             }
                         }
-                        app.push_navigation(tab_id);
+                        app.mark_navigation(tab_id);
                         Ok(())
                     })),
                     &mut token,
@@ -670,7 +727,7 @@ impl App {
                                 tab.can_go_forward = forward;
                             }
                         }
-                        app.push_navigation(tab_id);
+                        app.mark_navigation(tab_id);
                         Ok(())
                     })),
                     &mut token,
@@ -698,8 +755,8 @@ impl App {
                         if app.settings.borrow().save_history {
                             let _ = app.storage.record_visit(&url, &title);
                         }
-                        app.push_tabs();
-                        app.push_navigation(tab_id);
+                        app.mark_tabs();
+                        app.mark_navigation(tab_id);
                         Ok(())
                     })),
                     &mut token,
@@ -732,7 +789,7 @@ impl App {
                                 let _ = app.storage.update_title(&url, &title);
                             }
                         }
-                        app.push_tabs();
+                        app.mark_tabs();
                         Ok(())
                     })),
                     &mut token,
@@ -760,7 +817,7 @@ impl App {
                                         tab.audible = audible;
                                     }
                                 }
-                                app.push_tabs();
+                                app.mark_tabs();
                                 Ok(())
                             },
                         )),
@@ -1067,14 +1124,14 @@ impl App {
                             read_i64(|out| op.TotalBytesToReceive(out)),
                             read_i64(|out| op.BytesReceived(out)),
                         );
-                        app.push_downloads();
+                        app.mark_downloads();
                         Ok(())
                     })),
                     &mut token,
                 );
             }
 
-            self.push_downloads();
+            self.mark_downloads();
             self.toast("Download started", ToastKind::Info);
         }
     }
@@ -1222,7 +1279,7 @@ impl App {
                     tabs.insert(to, tab);
                 }
                 drop(tabs);
-                self.push_tabs();
+                self.mark_tabs();
             }
 
             // ---- window ----
@@ -1531,10 +1588,27 @@ impl App {
         }
     }
 
+    /// Run the reclaim timer only when it has something to do.
+    ///
+    /// With a single visible tab nothing is ever reclaimable — the foreground
+    /// tab is exempt — so the timer would be a periodic wakeup that decides
+    /// nothing. A browser that costs nothing while idle has to stop its own
+    /// clocks, not just the page's.
+    fn update_reclaim_timer(&self) {
+        let needed = self.minimized.get() || self.tabs.borrow().len() > 1;
+        let interval = if needed {
+            reclaim::tick_interval_ms(&self.settings.borrow())
+        } else {
+            0
+        };
+        self.window.set_reclaim_timer(interval);
+    }
+
     // ------------------------------------------------------------- reclaim
 
     fn reclaim(self: &Rc<Self>) {
         let active = self.active.get();
+        let minimized = self.minimized.get();
 
         // Borrowed, not cloned: `Settings` owns several `String`s and a `Vec`
         // of filter-list URLs, and this runs on a timer. Nothing in the loop
@@ -1550,7 +1624,7 @@ impl App {
                         is_audible: tab.audible,
                         power: tab.power,
                     };
-                    (tab.id, reclaim::decide(state, &settings))
+                    (tab.id, reclaim::decide(state, minimized, &settings))
                 })
                 .collect()
         };
@@ -1584,7 +1658,7 @@ impl App {
                                 };
                             }
                             drop(tabs);
-                            app.push_tabs();
+                            app.mark_tabs();
                         });
                     }
                 }
@@ -1594,7 +1668,7 @@ impl App {
                         tab.discard();
                     }
                     drop(tabs);
-                    self.push_tabs();
+                    self.mark_tabs();
                 }
             }
         }
@@ -1604,6 +1678,38 @@ impl App {
 impl WindowDelegate for App {
     fn on_resize(&self, _width: i32, _height: i32, _dpi: u32) {
         self.layout();
+    }
+
+    fn on_flush_ui(&self) {
+        self.flush_ui();
+    }
+
+    fn on_minimized(&self, minimized: bool) {
+        self.minimized.set(minimized);
+
+        if minimized {
+            // Nothing is on screen, so every renderer can trim immediately
+            // rather than waiting for the next tick; the policy then suspends
+            // them on schedule.
+            let tabs = self.tabs.borrow();
+            for tab in tabs.iter() {
+                if let Some(webview) = &tab.webview {
+                    let _ = wv::set_low_memory(webview, true);
+                }
+            }
+            drop(tabs);
+
+            self.flush_counters();
+            self.storage.release_memory();
+            procstats::trim_working_set();
+        }
+
+        // Restoring has to re-enable the timer even when only one tab is open,
+        // because the foreground tab may need waking up.
+        self.update_reclaim_timer();
+        if let Some(app) = self.me() {
+            app.reclaim();
+        }
     }
 
     fn on_reclaim_tick(&self) {

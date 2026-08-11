@@ -418,3 +418,82 @@ mod tests {
         assert!(check(&mut restored, "https://ads.example.com/banner.js", "https://news.test/", "script"));
     }
 }
+
+/// Timing harness for the interception hot path.
+///
+/// Not a correctness test: it is `#[ignore]`d and only prints. Run with
+///
+/// ```text
+/// cargo test --release -- --ignored --nocapture hot_path
+/// ```
+///
+/// It exists because "the cache makes lookups cheap" is a claim that should be
+/// checkable, and because the cost of a change to `should_block` is otherwise
+/// invisible until it shows up as jank on a busy page.
+#[cfg(test)]
+mod perf {
+    use super::*;
+    use std::time::Instant;
+
+    const RULES: &str = "||ads.example.com^\n||tracker.test/pixel.gif\n||doubleclick.test^";
+
+    fn bench<F: FnMut() -> bool>(label: &str, iterations: u32, mut body: F) -> f64 {
+        // One untimed pass so the cache and branch predictors are warm; we are
+        // measuring steady-state page loading, not the first request ever.
+        body();
+        let start = Instant::now();
+        let mut sink = 0u32;
+        for _ in 0..iterations {
+            sink += body() as u32;
+        }
+        let nanos = start.elapsed().as_nanos() as f64 / f64::from(iterations);
+        std::hint::black_box(sink);
+        println!("  {label:<44} {nanos:>8.1} ns/request");
+        nanos
+    }
+
+    #[test]
+    #[ignore = "timing harness, not a correctness check"]
+    fn hot_path_cost() {
+        let mut blocker = Blocker::compile(vec![RULES.to_string()]);
+        let page = "https://news.example.org/section/article-12345?ref=home";
+        let host = crate::util::host_of(page).unwrap();
+        let allowed = "https://cdn.news.example.org/assets/app.7f3a91.js";
+        let blocked = "https://ads.example.com/tag/loader.js";
+
+        println!("\ncache hit (the overwhelmingly common case)");
+        let with_host =
+            bench("host precomputed (current)", 200_000, || {
+                blocker.should_block(allowed, page, &host, "script")
+            });
+        // What the code did before: derive the host from the source URL on
+        // every single call, including the hits this cache exists to serve.
+        let with_parse = bench("host parsed per call (previous)", 200_000, || {
+            let host = crate::util::host_of(page).unwrap_or_default();
+            blocker.should_block(allowed, page, &host, "script")
+        });
+        println!("  -> {:.1}x faster per cached request", with_parse / with_host);
+
+        println!("\ncache miss (first sighting of a URL)");
+        let mut miss = Blocker::compile(vec![RULES.to_string()]);
+        let mut n = 0u32;
+        bench("engine evaluation, unique URLs", 20_000, || {
+            n += 1;
+            let url = format!("https://cdn.news.example.org/a/{n}.js");
+            miss.should_block(&url, page, &host, "script")
+        });
+
+        println!("\nblocked request");
+        bench("matching rule", 200_000, || {
+            blocker.should_block(blocked, page, &host, "script")
+        });
+
+        let stats = blocker.stats();
+        println!(
+            "\n  cache: {} hits / {} misses ({:.2}% hit rate)\n",
+            stats.cache_hits,
+            stats.cache_misses,
+            100.0 * stats.cache_hits as f64 / (stats.cache_hits + stats.cache_misses) as f64
+        );
+    }
+}

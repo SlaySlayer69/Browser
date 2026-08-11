@@ -16,8 +16,9 @@
 //! (needed so the omnibox dropdown can overlay the page), and tab switching
 //! that is a `ShowWindow` call instead of a resize.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -42,6 +43,17 @@ const SURFACE_0: u32 = 0x0011_0F0E; // COLORREF is 0x00BBGGRR
 /// Messages the app layer handles. Kept above `WM_APP` so they cannot collide
 /// with anything Windows sends.
 pub const WM_APP_FILTERS_READY: u32 = WM_APP + 1;
+/// Posted by the browser layer when chrome state has changed. See
+/// [`crate::browser::pending`] for why updates are coalesced through a message
+/// rather than sent as they happen.
+pub const WM_APP_FLUSH_UI: u32 = WM_APP + 2;
+
+/// Shortest gap between WebView resizes while the user is dragging the frame.
+///
+/// Windows sends `WM_SIZE` continuously during a drag, and each one costs a
+/// renderer relayout. One per frame is all a 60 Hz display can show; the exact
+/// final size is applied on `WM_EXITSIZEMOVE`.
+const RESIZE_THROTTLE: Duration = Duration::from_millis(16);
 
 /// Timer id for the background-tab reclaim policy.
 pub const TIMER_RECLAIM: usize = 1;
@@ -52,6 +64,11 @@ pub const TIMER_RECLAIM: usize = 1;
 pub trait WindowDelegate {
     /// Client area changed; re-layout the WebView controllers.
     fn on_resize(&self, width: i32, height: i32, dpi: u32);
+    /// Coalesced chrome update is due.
+    fn on_flush_ui(&self);
+    /// The window was minimized or restored. A minimized window paints
+    /// nothing, which makes even its foreground tab reclaimable.
+    fn on_minimized(&self, minimized: bool);
     /// Reclaim timer fired.
     fn on_reclaim_tick(&self);
     /// Freshly compiled filter lists are ready to be swapped in.
@@ -65,7 +82,12 @@ pub trait WindowDelegate {
 /// Per-window state reachable from the window procedure.
 struct WindowState {
     delegate: RefCell<Option<Rc<dyn WindowDelegate>>>,
-    was_maximized: RefCell<bool>,
+    was_maximized: Cell<bool>,
+    was_minimized: Cell<bool>,
+    /// True between WM_ENTERSIZEMOVE and WM_EXITSIZEMOVE, i.e. while the user
+    /// is dragging the frame. Only then is resizing throttled.
+    in_size_move: Cell<bool>,
+    last_resize: Cell<Instant>,
 }
 
 pub struct MainWindow {
@@ -107,7 +129,10 @@ impl MainWindow {
 
             let state = Box::into_raw(Box::new(WindowState {
                 delegate: RefCell::new(None),
-                was_maximized: RefCell::new(false),
+                was_maximized: Cell::new(false),
+                was_minimized: Cell::new(false),
+                in_size_move: Cell::new(false),
+                last_resize: Cell::new(Instant::now()),
             }));
 
             let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
@@ -416,20 +441,59 @@ unsafe extern "system" fn wnd_proc(
             default
         }
 
-        WM_SIZE => {
-            let width = (lparam.0 & 0xFFFF) as i16 as i32;
-            let height = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            if let Some(delegate) = delegate() {
-                delegate.on_resize(width, height, GetDpiForWindow(hwnd).max(96));
+        WM_ENTERSIZEMOVE => {
+            (*state).in_size_move.set(true);
+            LRESULT(0)
+        }
 
-                let maximized = IsZoomed(hwnd).as_bool();
-                let mut was = (*state).was_maximized.borrow_mut();
-                if *was != maximized {
-                    *was = maximized;
-                    drop(was);
-                    delegate.on_maximize_changed(maximized);
+        WM_EXITSIZEMOVE => {
+            (*state).in_size_move.set(false);
+            // The drag may have ended on a size the throttle skipped, so the
+            // final geometry is always applied exactly once here.
+            if let Some(delegate) = delegate() {
+                let mut rect = RECT::default();
+                if GetClientRect(hwnd, &mut rect).is_ok() {
+                    delegate.on_resize(
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        GetDpiForWindow(hwnd).max(96),
+                    );
                 }
             }
+            LRESULT(0)
+        }
+
+        WM_SIZE => {
+            let Some(delegate) = delegate() else { return LRESULT(0) };
+
+            let minimized = wparam.0 as u32 == SIZE_MINIMIZED;
+            if (*state).was_minimized.replace(minimized) != minimized {
+                delegate.on_minimized(minimized);
+            }
+            if minimized {
+                // A minimized window has a zero-sized client area; laying the
+                // WebViews out to it would only have to be undone on restore.
+                return LRESULT(0);
+            }
+
+            let maximized = IsZoomed(hwnd).as_bool();
+            if (*state).was_maximized.replace(maximized) != maximized {
+                delegate.on_maximize_changed(maximized);
+            }
+
+            // Throttled only while the frame is being dragged; a one-shot
+            // resize (maximize, restore, DPI change) is applied immediately.
+            let now = Instant::now();
+            if (*state).in_size_move.get()
+                && now.duration_since((*state).last_resize.get()) < RESIZE_THROTTLE
+            {
+                return LRESULT(0);
+            }
+            (*state).last_resize.set(now);
+
+            let width = (lparam.0 & 0xFFFF) as i16 as i32;
+            let height = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            delegate.on_resize(width, height, GetDpiForWindow(hwnd).max(96));
             LRESULT(0)
         }
 
@@ -455,6 +519,13 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER if wparam.0 == TIMER_RECLAIM => {
             if let Some(delegate) = delegate() {
                 delegate.on_reclaim_tick();
+            }
+            LRESULT(0)
+        }
+
+        WM_APP_FLUSH_UI => {
+            if let Some(delegate) = delegate() {
+                delegate.on_flush_ui();
             }
             LRESULT(0)
         }

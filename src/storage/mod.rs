@@ -65,6 +65,16 @@ impl Storage {
         &self.conn
     }
 
+    /// Release SQLite's page cache and prepared-statement cache.
+    ///
+    /// Called when the window is minimized. The cache is capped at 2 MiB, so
+    /// this is not a large win on its own — but it is free, and a browser
+    /// sitting in the taskbar has no use for a warm page cache.
+    pub fn release_memory(&self) {
+        // Best-effort: failing to shrink is never worth surfacing.
+        let _ = self.conn.execute_batch("PRAGMA shrink_memory");
+    }
+
 }
 
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
