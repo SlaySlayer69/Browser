@@ -257,6 +257,13 @@ On the machine this was developed on, a cached decision costs **69 ns** with the
 page host precomputed versus **567 ns** when the source URL was parsed on every
 call — the regression that measurement was written to catch.
 
+## Learning your way around
+
+`docs/LERNEN.md` is a beginner-oriented walkthrough of this codebase (in
+German): what happens when you load a page, the Rust and Win32 concepts as they
+appear in the actual files, a suggested reading order, and four levels of
+exercises. Start there if the code is new to you.
+
 ## Building
 
 Requires the WebView2 runtime (preinstalled on Windows 11 and current Windows
