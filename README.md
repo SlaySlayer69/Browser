@@ -86,6 +86,31 @@ A tab playing audio never gets past the first row. A `TrySuspend` that the
 runtime refuses leaves the tab marked as *not* suspended, so the next tick
 retries instead of trusting a freeze that never happened.
 
+### Doing nothing well
+
+Idle cost is a feature, so three mechanisms exist purely to avoid work:
+
+* **Chrome updates are coalesced.** A page load fires a burst of WebView2
+  events, and pushing each one to the chrome costs a JSON serialization, a
+  cross-process message, a JS wakeup and a DOM reconcile. Handlers mark what
+  changed (`browser/pending.rs`); the first mark posts one application message,
+  which Windows dispatches after the burst has landed. Message-driven, not
+  timer-driven — an idle browser posts nothing.
+* **The reclaim timer stops when there is nothing to reclaim.** With a single
+  visible tab the foreground tab is exempt anyway, so the timer would wake up
+  every 15–60 s to decide nothing.
+* **Resizes are throttled while the frame is dragged.** Windows sends `WM_SIZE`
+  continuously, and each one forces a renderer relayout; between
+  `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE` that is capped at one per 16 ms, with
+  the exact final geometry applied once when the drag ends.
+
+### Minimizing
+
+A minimized window paints nothing, so its foreground tab loses its exemption
+and is suspended on the normal schedule — audio still excepted, since
+minimizing is how most people listen to it. The host also trims its own working
+set, drops SQLite's caches and flushes pending counters at the same moment.
+
 Chromium flags live in `engine/flags.rs`. Two of them trade away a security
 boundary (`disable_site_isolation`, `disable_smartscreen`); both default to
 **keeping** the protection and are opt-in via `settings.json`.
@@ -217,6 +242,20 @@ so the host never has to guess which header pixels are a button.
   `textContent`; nothing from history, a filename or a vault entry is parsed as
   HTML.
 * Filter lists are fetched over HTTPS only — they steer what the browser blocks.
+
+## Measuring
+
+The interception path has a timing harness, because "the cache makes lookups
+cheap" is a claim that should be checkable:
+
+```bash
+cargo test --release -- --ignored --nocapture hot_path
+```
+
+It reports the cost of a cached decision, a cache miss, and a blocked request.
+On the machine this was developed on, a cached decision costs **69 ns** with the
+page host precomputed versus **567 ns** when the source URL was parsed on every
+call — the regression that measurement was written to catch.
 
 ## Building
 
