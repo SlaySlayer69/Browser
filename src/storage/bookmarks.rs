@@ -176,3 +176,48 @@ mod tests {
         assert!(s.bookmarks().unwrap().is_empty());
     }
 }
+
+/// Timing harness for the per-navigation lookup. See `blocker::perf`.
+#[cfg(test)]
+mod perf {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "timing harness, not a correctness check"]
+    fn bookmark_lookup_cost() {
+        let s = Storage::in_memory().unwrap();
+        for i in 0..500 {
+            s.add_bookmark(&format!("https://site{i}.test/page"), &format!("Site {i}")).unwrap();
+        }
+        let url = "https://site250.test/page";
+
+        let iterations = 20_000;
+
+        // What `push_navigation` used to do on every navigation event: prepare
+        // the statement afresh each time.
+        s.is_bookmarked(url).unwrap();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let found: Option<i64> = s
+                .conn()
+                .query_row("SELECT id FROM bookmarks WHERE url = ?1", [url], |r| r.get(0))
+                .optional()
+                .unwrap();
+            std::hint::black_box(found);
+        }
+        let uncached = start.elapsed().as_nanos() as f64 / f64::from(iterations);
+
+        let start = Instant::now();
+        for _ in 0..iterations {
+            std::hint::black_box(s.is_bookmarked(url).unwrap());
+        }
+        let cached = start.elapsed().as_nanos() as f64 / f64::from(iterations);
+
+        println!("\nbookmark lookup, 500 rows");
+        println!("  statement prepared per call (previous)   {uncached:>8.0} ns");
+        println!("  cached statement (current)               {cached:>8.0} ns");
+        println!("  -> {:.1}x faster; and the call itself is now made", uncached / cached);
+        println!("     once per navigation instead of ~35 times\n");
+    }
+}

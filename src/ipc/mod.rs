@@ -443,3 +443,68 @@ mod tests {
         assert!(json.contains(r#""shieldActive":true"#));
     }
 }
+
+/// Timing harness for the messages sent to the chrome. See `blocker::perf`.
+#[cfg(test)]
+mod perf {
+    use super::*;
+    use std::time::Instant;
+
+    fn tabs_event(count: u32) -> Event<'static> {
+        let tabs = (0..count)
+            .map(|id| TabView {
+                id,
+                title: format!("Some Reasonably Long Page Title {id} — Example Site"),
+                url: format!("https://example{id}.test/some/path?query=value"),
+                loading: false,
+                asleep: false,
+                muted: false,
+                audible: false,
+            })
+            .collect();
+        Event::Tabs { tabs, active: Some(0) }
+    }
+
+    fn bench(label: &str, iterations: u32, mut body: impl FnMut() -> usize) {
+        body();
+        let start = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iterations {
+            sink += body();
+        }
+        let nanos = start.elapsed().as_nanos() as f64 / f64::from(iterations);
+        println!("  {label:<40} {nanos:>8.0} ns   ({} bytes)", sink / iterations as usize);
+    }
+
+    #[test]
+    #[ignore = "timing harness, not a correctness check"]
+    fn chrome_message_cost() {
+        println!("\nserializing one chrome message");
+
+        let twenty = tabs_event(20);
+        bench("tabs event, 20 tabs", 20_000, || twenty.to_json().len());
+
+        let navigation = Event::Navigation {
+            id: 1,
+            url: "https://news.example.org/section/article-12345?ref=home",
+            title: "A Reasonably Long Article Headline — Example News",
+            can_go_back: true,
+            can_go_forward: false,
+            loading: false,
+            bookmarked: false,
+            secure: true,
+            blocked: 42,
+            shield_active: true,
+        };
+        bench("navigation event", 50_000, || navigation.to_json().len());
+
+        // What the blocker's badge refresh sends now instead.
+        let blocked = Event::Blocked { id: 1, count: 42 };
+        bench("blocked badge event", 50_000, || blocked.to_json().len());
+
+        println!(
+            "\n  A page load used to send ~9 of these plus one navigation event\n  \
+             per 10 blocked requests; it now sends one flush.\n"
+        );
+    }
+}
